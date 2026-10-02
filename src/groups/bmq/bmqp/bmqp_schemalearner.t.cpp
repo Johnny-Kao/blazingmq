@@ -26,6 +26,12 @@
 
 // TEST DRIVER
 #include <bmqtst_testhelper.h>
+
+// BENCHMARKING LIBRARY
+#ifdef BMQTST_BENCHMARK_ENABLED
+#include <benchmark/benchmark.h>
+#endif
+
 #include <bsl_cstdlib.h>
 #include <bsl_cstring.h>
 
@@ -470,6 +476,37 @@ static void test7_removeBeforeRead()
     }
 }
 
+#ifdef BMQTST_BENCHMARK_ENABLED
+static void testN1_multiplexHot_GoogleBenchmark(benchmark::State& state)
+{
+    bmqtst::TestHelperUtil::ignoreCheckDefAlloc() = true;
+
+    bmqp::SchemaLearner learner(bmqtst::TestHelperUtil::allocator());
+    bmqp::SchemaLearner::Context context = learner.createContext();
+    bmqp::MessagePropertiesInfo input(true, 1, false);
+
+    benchmark::DoNotOptimize(learner.multiplex(context, input).schemaId());
+
+    for (auto _ : state) {
+        benchmark::DoNotOptimize(learner.multiplex(context, input).schemaId());
+    }
+}
+static void testN2_demultiplexHot_GoogleBenchmark(benchmark::State& state)
+{
+    bmqtst::TestHelperUtil::ignoreCheckDefAlloc() = true;
+
+    bmqp::SchemaLearner learner(bmqtst::TestHelperUtil::allocator());
+    bmqp::SchemaLearner::Context context = learner.createContext();
+    bmqp::MessagePropertiesInfo input(true, 1, false);
+
+    benchmark::DoNotOptimize(learner.demultiplex(context, input).schemaId());
+
+    for (auto _ : state) {
+        benchmark::DoNotOptimize(learner.demultiplex(context, input).schemaId());
+    }
+}
+#endif  // BMQTST_BENCHMARK_ENABLED
+
 // ============================================================================
 //                                 MAIN PROGRAM
 // ----------------------------------------------------------------------------
@@ -487,11 +524,25 @@ int main(int argc, char* argv[])
     case 3: test3_observingTest(); break;
     case 2: test2_readingTest(); break;
     case 1: test1_multiplexingTest(); break;
+    case -1:
+        BMQTST_BENCHMARK_WITH_ARGS(testN1_multiplexHot,
+                                   Unit(benchmark::kNanosecond));
+        break;
+    case -2:
+        BMQTST_BENCHMARK_WITH_ARGS(testN2_demultiplexHot,
+                                   Unit(benchmark::kNanosecond));
+        break;
     default: {
         cerr << "WARNING: CASE '" << _testCase << "' NOT FOUND." << endl;
         bmqtst::TestHelperUtil::testStatus() = -1;
     } break;
     }
+#ifdef BMQTST_BENCHMARK_ENABLED
+    if (_testCase < 0) {
+        benchmark::Initialize(&argc, argv);
+        benchmark::RunSpecifiedBenchmarks();
+    }
+#endif
 
     TEST_EPILOG(bmqtst::TestHelper::e_CHECK_GBL_ALLOC);
 }

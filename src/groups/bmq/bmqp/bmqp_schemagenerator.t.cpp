@@ -22,6 +22,12 @@
 
 // TEST DRIVER
 #include <bmqtst_testhelper.h>
+
+// BENCHMARKING LIBRARY
+#ifdef BMQTST_BENCHMARK_ENABLED
+#include <benchmark/benchmark.h>
+#endif
+
 #include <bsl_cstdlib.h>
 #include <bsl_map.h>
 
@@ -181,6 +187,36 @@ static void test1_breathingTest()
     }
 }
 
+#ifdef BMQTST_BENCHMARK_ENABLED
+static void testN1_getSchemaIdHot_GoogleBenchmark(benchmark::State& state)
+{
+    bmqtst::TestHelperUtil::ignoreCheckDefAlloc() = true;
+
+    const int numProperties = static_cast<int>(state.range(0));
+    const int nameLength    = static_cast<int>(state.range(1));
+
+    bmqp::MessageProperties mps(bmqtst::TestHelperUtil::allocator());
+    for (int i = 0; i < numProperties; ++i) {
+        bsl::string name("p", bmqtst::TestHelperUtil::allocator());
+        name += bsl::to_string(i);
+        if (static_cast<int>(name.length()) < nameLength) {
+            name.append(nameLength - name.length(), 'x');
+        }
+        BMQTST_ASSERT_EQ(0, mps.setPropertyAsString(name, "v"));
+    }
+
+    bmqp::SchemaGenerator generator(bmqtst::TestHelperUtil::allocator());
+
+    // Warm the schema cache so the timed region measures the steady-state hit
+    // path used when a producer repeatedly publishes the same schema.
+    benchmark::DoNotOptimize(generator.getSchemaId(&mps).schemaId());
+
+    for (auto _ : state) {
+        benchmark::DoNotOptimize(generator.getSchemaId(&mps).schemaId());
+    }
+}
+#endif  // BMQTST_BENCHMARK_ENABLED
+
 // ============================================================================
 //                                 MAIN PROGRAM
 // ----------------------------------------------------------------------------
@@ -192,11 +228,23 @@ int main(int argc, char* argv[])
     switch (_testCase) {
     case 0:
     case 1: test1_breathingTest(); break;
+    case -1:
+        BMQTST_BENCHMARK_WITH_ARGS(testN1_getSchemaIdHot,
+                                   ArgsProduct({{1, 4, 8, 16, 32},
+                                                {8, 32, 128}})
+                                       ->Unit(benchmark::kNanosecond));
+        break;
     default: {
         cerr << "WARNING: CASE '" << _testCase << "' NOT FOUND." << endl;
         bmqtst::TestHelperUtil::testStatus() = -1;
     } break;
     }
+#ifdef BMQTST_BENCHMARK_ENABLED
+    if (_testCase < 0) {
+        benchmark::Initialize(&argc, argv);
+        benchmark::RunSpecifiedBenchmarks();
+    }
+#endif
 
     TEST_EPILOG(bmqtst::TestHelper::e_CHECK_GBL_ALLOC);
 }
