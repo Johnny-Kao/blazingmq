@@ -183,6 +183,6 @@ PY
 
       - uses: actions/upload-artifact@v4
         with:
-          name: schema-threshold-${{ strategy.job-index }}
+          name: schema-threshold-${{ matrix.order }}
           path: perf-results
           retention-days: 7
