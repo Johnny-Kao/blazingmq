@@ -1,4 +1,4 @@
-name: Schema Generator Attribution Lab
+name: Schema Local-Buffer Threshold Lab
 
 on:
   push:
@@ -10,25 +10,23 @@ permissions:
   contents: read
 
 concurrency:
-  group: schema-generator-attribution
+  group: schema-local-buffer-threshold
   cancel-in-progress: true
 
 jobs:
-  linux-x86-attribution:
+  linux-x86-threshold:
     strategy:
       fail-fast: false
       matrix:
         order:
-          - base-a-b
-          - base-b-a
-          - a-b-base
-          - b-a-base
+          - a1024-a512-a2048-a4096-exact1024-heap-heapreserve
+          - heapreserve-heap-exact1024-a4096-a2048-a512-a1024
+          - a2048-a4096-a1024-a512-heapreserve-exact1024-heap
+          - heap-a512-exact1024-a2048-a1024-heapreserve-a4096
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     env:
-      BASE_REF: 7981dfc38fbde7edcc11ef36843293b64d96ab08
       A_REF: f9acace32cf3426c920d0bba5c2f25e563ae56ed
-      B_REF: 8afc63c8f57124ff230eeb6a1480f2c2d337d968
     steps:
       - uses: actions/checkout@v4
         with:
@@ -45,14 +43,15 @@ jobs:
             echo
             lscpu
             echo
+            lscpu -e=CPU,CORE,SOCKET,NODE,ONLINE,MAXMHZ,MINMHZ 2>/dev/null || true
+            echo
             free -h
             echo
             uptime
             echo
             systemd-detect-virt || true
             echo
-            cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || true
-            cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq 2>/dev/null || true
+            grep -E 'model name|cpu MHz|siblings|cpu cores' /proc/cpuinfo | head -n 32 || true
           } | tee perf-results/environment.txt
 
       - name: Install build prerequisites
@@ -63,28 +62,65 @@ jobs:
             bison libfl-dev libbenchmark-dev libgmock-dev libgtest-dev libtool \
             libz-dev libssl-dev
 
-      - name: Build and measure Base / A / B on same runner
+      - name: Build and measure threshold variants on same runner
         shell: bash
         run: |
           set -euo pipefail
-
           source_path="src/groups/bmq/bmqp/bmqp_schemagenerator.cpp"
 
-          ref_for() {
-            case "$1" in
-              base) echo "$BASE_REF" ;;
-              a) echo "$A_REF" ;;
-              b) echo "$B_REF" ;;
-              *) return 2 ;;
-            esac
+          write_variant() {
+            local label="$1"
+            git checkout "$A_REF" -- "$source_path"
+            LABEL="$label" python3 - <<'PY'
+import os
+from pathlib import Path
+p = Path("src/groups/bmq/bmqp/bmqp_schemagenerator.cpp")
+s = p.read_text()
+label = os.environ["LABEL"]
+
+if label.startswith("a") and label[1:].isdigit():
+    size = label[1:]
+    s = s.replace("LocalSequentialAllocator<1024>", f"LocalSequentialAllocator<{size}>", 1)
+elif label == "heap":
+    s = s.replace(
+        "    bdlma::LocalSequentialAllocator<1024> localAllocator(d_allocator_p);\n"
+        "    MessagePropertiesIterator             it(mps);\n"
+        "    bsl::string                           key(&localAllocator);",
+        "    MessagePropertiesIterator it(mps);\n"
+        "    bsl::string               key(d_allocator_p);",
+        1,
+    )
+elif label in ("exact1024", "heapreserve"):
+    allocator = "&localAllocator" if label == "exact1024" else "d_allocator_p"
+    prefix = (
+        "    bdlma::LocalSequentialAllocator<1024> localAllocator(d_allocator_p);\n"
+        if label == "exact1024" else ""
+    )
+    old = (
+        "    bdlma::LocalSequentialAllocator<1024> localAllocator(d_allocator_p);\n"
+        "    MessagePropertiesIterator             it(mps);\n"
+        "    bsl::string                           key(&localAllocator);"
+    )
+    new = (
+        prefix
+        + "    MessagePropertiesIterator sizingIt(mps);\n"
+        + "    bsl::size_t keyLength = 0;\n"
+        + "    while (sizingIt.hasNext()) {\n"
+        + "        keyLength += 1 + sizingIt.name().size();\n"
+        + "    }\n"
+        + "    MessagePropertiesIterator it(mps);\n"
+        + f"    bsl::string key({allocator});\n"
+        + "    key.reserve(keyLength);"
+    )
+    s = s.replace(old, new, 1)
+else:
+    raise SystemExit(f"unknown variant: {label}")
+
+p.write_text(s)
+PY
           }
 
-          apply_variant() {
-            local label="$1"
-            local ref
-            ref="$(ref_for "$label")"
-            git checkout "$ref" -- "$source_path"
-
+          build_variant() {
             if [[ ! -d thirdparty/bde ]]; then
               bin/build-ubuntu.sh
             else
@@ -99,45 +135,54 @@ jobs:
             fi
           }
 
+          run_bench() {
+            if command -v taskset >/dev/null 2>&1; then
+              taskset -c 0 "$@"
+            else
+              "$@"
+            fi
+          }
+
           measure_variant() {
             local label="$1"
-            echo "===== $label warmup ====="
-            ./build/blazingmq/tests/bmqp_schemagenerator.t -1 \
-              --benchmark_min_time=0.10s \
+            echo "===== $label ====="
+            git diff -- "$source_path" > "perf-results/${label}-source.diff"
+
+            run_bench ./build/blazingmq/tests/bmqp_schemagenerator.t -1 \
+              --benchmark_min_time=0.08s \
               --benchmark_repetitions=1 >/dev/null
 
-            echo "===== $label measured ====="
-            ./build/blazingmq/tests/bmqp_schemagenerator.t -1 \
-              --benchmark_min_time=0.20s \
-              --benchmark_repetitions=7 \
+            run_bench ./build/blazingmq/tests/bmqp_schemagenerator.t -1 \
+              --benchmark_min_time=0.15s \
+              --benchmark_repetitions=5 \
               --benchmark_report_aggregates_only=true \
               --benchmark_out="perf-results/${label}-generator.json" \
               --benchmark_out_format=json
 
-            ./build/blazingmq/tests/bmqp_schemagenerator.t 2 \
+            run_bench ./build/blazingmq/tests/bmqp_schemagenerator.t 2 \
               | tee "perf-results/${label}-alloc.txt"
 
-            ./build/blazingmq/tests/bmqp_schemagenerator.t 1
+            run_bench ./build/blazingmq/tests/bmqp_schemagenerator.t 1
           }
 
-          IFS='-' read -r first second third <<< "${{ matrix.order }}"
-          for label in "$first" "$second" "$third"; do
-            apply_variant "$label"
+          IFS='-' read -ra labels <<< "${{ matrix.order }}"
+          for label in "${labels[@]}"; do
+            write_variant "$label"
+            build_variant
             measure_variant "$label"
           done
 
-      - name: Save source identities
+      - name: Save identities
         run: |
           {
-            echo "BASE_REF=$BASE_REF"
             echo "A_REF=$A_REF"
-            echo "B_REF=$B_REF"
             echo "HARNESS_SHA=$GITHUB_SHA"
             echo "ORDER=${{ matrix.order }}"
+            echo "CPU_PIN=0"
           } > perf-results/refs.txt
 
       - uses: actions/upload-artifact@v4
         with:
-          name: schema-generator-${{ matrix.order }}
+          name: schema-threshold-${{ strategy.job-index }}
           path: perf-results
           retention-days: 7
