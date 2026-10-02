@@ -72,52 +72,52 @@ jobs:
             local label="$1"
             git checkout "$A_REF" -- "$source_path"
             LABEL="$label" python3 - <<'PY'
-import os
-from pathlib import Path
-p = Path("src/groups/bmq/bmqp/bmqp_schemagenerator.cpp")
-s = p.read_text()
-label = os.environ["LABEL"]
-
-if label.startswith("a") and label[1:].isdigit():
-    size = label[1:]
-    s = s.replace("LocalSequentialAllocator<1024>", f"LocalSequentialAllocator<{size}>", 1)
-elif label == "heap":
-    s = s.replace(
-        "    bdlma::LocalSequentialAllocator<1024> localAllocator(d_allocator_p);\n"
-        "    MessagePropertiesIterator             it(mps);\n"
-        "    bsl::string                           key(&localAllocator);",
-        "    MessagePropertiesIterator it(mps);\n"
-        "    bsl::string               key(d_allocator_p);",
-        1,
-    )
-elif label in ("exact1024", "heapreserve"):
-    allocator = "&localAllocator" if label == "exact1024" else "d_allocator_p"
-    prefix = (
-        "    bdlma::LocalSequentialAllocator<1024> localAllocator(d_allocator_p);\n"
-        if label == "exact1024" else ""
-    )
-    old = (
-        "    bdlma::LocalSequentialAllocator<1024> localAllocator(d_allocator_p);\n"
-        "    MessagePropertiesIterator             it(mps);\n"
-        "    bsl::string                           key(&localAllocator);"
-    )
-    new = (
-        prefix
-        + "    MessagePropertiesIterator sizingIt(mps);\n"
-        + "    bsl::size_t keyLength = 0;\n"
-        + "    while (sizingIt.hasNext()) {\n"
-        + "        keyLength += 1 + sizingIt.name().size();\n"
-        + "    }\n"
-        + "    MessagePropertiesIterator it(mps);\n"
-        + f"    bsl::string key({allocator});\n"
-        + "    key.reserve(keyLength);"
-    )
-    s = s.replace(old, new, 1)
-else:
-    raise SystemExit(f"unknown variant: {label}")
-
-p.write_text(s)
-PY
+          import os
+          from pathlib import Path
+          p = Path("src/groups/bmq/bmqp/bmqp_schemagenerator.cpp")
+          s = p.read_text()
+          label = os.environ["LABEL"]
+          
+          if label.startswith("a") and label[1:].isdigit():
+              size = label[1:]
+              s = s.replace("LocalSequentialAllocator<1024>", f"LocalSequentialAllocator<{size}>", 1)
+          elif label == "heap":
+              s = s.replace(
+                  "    bdlma::LocalSequentialAllocator<1024> localAllocator(d_allocator_p);\n"
+                  "    MessagePropertiesIterator             it(mps);\n"
+                  "    bsl::string                           key(&localAllocator);",
+                  "    MessagePropertiesIterator it(mps);\n"
+                  "    bsl::string               key(d_allocator_p);",
+                  1,
+              )
+          elif label in ("exact1024", "heapreserve"):
+              allocator = "&localAllocator" if label == "exact1024" else "d_allocator_p"
+              prefix = (
+                  "    bdlma::LocalSequentialAllocator<1024> localAllocator(d_allocator_p);\n"
+                  if label == "exact1024" else ""
+              )
+              old = (
+                  "    bdlma::LocalSequentialAllocator<1024> localAllocator(d_allocator_p);\n"
+                  "    MessagePropertiesIterator             it(mps);\n"
+                  "    bsl::string                           key(&localAllocator);"
+              )
+              new = (
+                  prefix
+                  + "    MessagePropertiesIterator sizingIt(mps);\n"
+                  + "    bsl::size_t keyLength = 0;\n"
+                  + "    while (sizingIt.hasNext()) {\n"
+                  + "        keyLength += 1 + sizingIt.name().size();\n"
+                  + "    }\n"
+                  + "    MessagePropertiesIterator it(mps);\n"
+                  + f"    bsl::string key({allocator});\n"
+                  + "    key.reserve(keyLength);"
+              )
+              s = s.replace(old, new, 1)
+          else:
+              raise SystemExit(f"unknown variant: {label}")
+          
+          p.write_text(s)
+          PY
           }
 
           build_variant() {
