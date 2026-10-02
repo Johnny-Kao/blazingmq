@@ -92,8 +92,8 @@ static void test2_allocatorProfile()
 {
     bmqtst::TestHelperUtil::ignoreCheckDefAlloc() = true;
 
-    const int propertyCounts[] = {1, 8, 16, 32};
-    const int nameLengths[]    = {8, 32, 128};
+    const int propertyCounts[] = {1, 4, 8, 16, 32, 64};
+    const int nameLengths[]    = {8, 32, 64, 128, 256};
 
     const int numPropertyCounts =
         static_cast<int>(sizeof(propertyCounts) / sizeof(*propertyCounts));
@@ -280,8 +280,8 @@ int main(int argc, char* argv[])
     case 1: test1_breathingTest(); break;
     case -1:
         BMQTST_BENCHMARK_WITH_ARGS(testN1_getSchemaIdHot,
-                                   ArgsProduct({{1, 4, 8, 16, 32},
-                                                {8, 32, 128}})
+                                   ArgsProduct({{1, 4, 8, 16, 32, 64},
+                                                {8, 32, 64, 128, 256}})
                                        ->Unit(benchmark::kNanosecond));
         break;
     default: {
