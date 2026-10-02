@@ -382,7 +382,7 @@ static void test8_allocatorProfile()
 
         for (int i = 0; i < hitRate; ++i) {
             bmqp::MessagePropertiesInfo input(true,
-                                              static_cast<SchemaIdType>(i + 1),
+                                              static_cast<bmqp::MessagePropertiesInfo::SchemaIdType>(i + 1),
                                               false);
             learner.multiplex(context, input);
         }
@@ -393,10 +393,9 @@ static void test8_allocatorProfile()
 
         for (int i = 0; i < 100; ++i) {
             bmqp::MessagePropertiesInfo input(true,
-                                              static_cast<SchemaIdType>(i + 1),
+                                              static_cast<bmqp::MessagePropertiesInfo::SchemaIdType>(i + 1),
                                               false);
-            benchmark::DoNotOptimize(learner.multiplex(context, input)
-                                         .schemaId());
+            learner.multiplex(context, input);
         }
 
         cout << "ALLOC_PROFILE multiplex hit_rate=" << hitRate
@@ -548,7 +547,7 @@ static void testN3_multiplexHitRate_GoogleBenchmark(benchmark::State& state)
 
         for (int i = 0; i < hitRate; ++i) {
             bmqp::MessagePropertiesInfo input(true,
-                                              static_cast<SchemaIdType>(i + 1),
+                                              static_cast<bmqp::MessagePropertiesInfo::SchemaIdType>(i + 1),
                                               false);
             benchmark::DoNotOptimize(learner.multiplex(context, input)
                                          .schemaId());
@@ -558,7 +557,7 @@ static void testN3_multiplexHitRate_GoogleBenchmark(benchmark::State& state)
 
         for (int i = 0; i < batchSize; ++i) {
             bmqp::MessagePropertiesInfo input(true,
-                                              static_cast<SchemaIdType>(i + 1),
+                                              static_cast<bmqp::MessagePropertiesInfo::SchemaIdType>(i + 1),
                                               false);
             benchmark::DoNotOptimize(learner.multiplex(context, input)
                                          .schemaId());
