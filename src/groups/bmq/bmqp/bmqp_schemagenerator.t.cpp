@@ -18,6 +18,7 @@
 
 // BDE
 #include <bdlb_random.h>
+#include <bslma_testallocator.h>
 #include <bslstl_map.h>
 
 // TEST DRIVER
@@ -83,6 +84,54 @@ static void generateMessageProperties(bmqp::MessageProperties* mps,
 
         if (++property == length[combination]) {
             property = 0;
+        }
+    }
+}
+
+static void test2_allocatorProfile()
+{
+    bmqtst::TestHelperUtil::ignoreCheckDefAlloc() = true;
+
+    const int propertyCounts[] = {1, 8, 16, 32};
+    const int nameLengths[]    = {8, 32, 128};
+
+    const int numPropertyCounts =
+        static_cast<int>(sizeof(propertyCounts) / sizeof(*propertyCounts));
+    const int numNameLengths =
+        static_cast<int>(sizeof(nameLengths) / sizeof(*nameLengths));
+
+    for (int p = 0; p < numPropertyCounts; ++p) {
+        for (int n = 0; n < numNameLengths; ++n) {
+            bslma::TestAllocator allocator("schemaGeneratorProfile");
+
+            bmqp::MessageProperties mps(&allocator);
+            for (int i = 0; i < propertyCounts[p]; ++i) {
+                bsl::string name("p", &allocator);
+                name += bsl::to_string(i);
+                if (static_cast<int>(name.length()) < nameLengths[n]) {
+                    name.append(nameLengths[n] - name.length(), 'x');
+                }
+                BMQTST_ASSERT_EQ(0, mps.setPropertyAsString(name, "v"));
+            }
+
+            bmqp::SchemaGenerator generator(&allocator);
+            generator.getSchemaId(&mps);
+
+            const bsls::Types::Int64 blocksBefore = allocator.numBlocksTotal();
+            const bsls::Types::Int64 bytesBefore  = allocator.numBytesTotal();
+            const bsls::Types::Int64 inUseBefore  = allocator.numBytesInUse();
+
+            const int iterations = 100;
+            for (int i = 0; i < iterations; ++i) {
+                generator.getSchemaId(&mps);
+            }
+
+            cout << "ALLOC_PROFILE generator properties=" << propertyCounts[p]
+                 << " name_length=" << nameLengths[n]
+                 << " blocks=" << allocator.numBlocksTotal() - blocksBefore
+                 << " bytes=" << allocator.numBytesTotal() - bytesBefore
+                 << " retained=" << allocator.numBytesInUse() - inUseBefore
+                 << endl;
         }
     }
 }
@@ -227,6 +276,7 @@ int main(int argc, char* argv[])
 
     switch (_testCase) {
     case 0:
+    case 2: test2_allocatorProfile(); break;
     case 1: test1_breathingTest(); break;
     case -1:
         BMQTST_BENCHMARK_WITH_ARGS(testN1_getSchemaIdHot,
