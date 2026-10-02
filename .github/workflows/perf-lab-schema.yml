@@ -12,7 +12,7 @@ permissions:
 jobs:
   linux-x86-ab:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     env:
       BASELINE_SHA: 7981dfc38fbde7edcc11ef36843293b64d96ab08
       VARIANT_SHA: f9acace32cf3426c920d0bba5c2f25e563ae56ed
@@ -39,10 +39,11 @@ jobs:
             bison libfl-dev libbenchmark-dev libgmock-dev libgtest-dev libtool \
             libz-dev libssl-dev
 
-      - name: Build baseline
+      - name: Build baseline targets only
         run: |
           git checkout "$BASELINE_SHA"
-          bin/build-ubuntu.sh
+          bin/build-ubuntu.sh --configure-only
+          DIR_THIRDPARTY="$PWD/thirdparty" DIR_BUILD="$PWD/build" DIR_INSTALL="$PWD" cmake --build --preset ubuntu-x64 --target bmqp_schemagenerator.t bmqp_schemalearner.t
 
       - name: Baseline warmup
         run: |
