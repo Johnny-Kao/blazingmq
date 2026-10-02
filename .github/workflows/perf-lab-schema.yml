@@ -1,4 +1,4 @@
-name: Schema Perf Lab
+name: Schema Generator Attribution Lab
 
 on:
   push:
@@ -10,16 +10,25 @@ permissions:
   contents: read
 
 concurrency:
-  group: schema-perf-signoff
+  group: schema-generator-attribution
   cancel-in-progress: true
 
 jobs:
-  linux-x86-ab:
+  linux-x86-attribution:
+    strategy:
+      fail-fast: false
+      matrix:
+        order:
+          - base-a-b
+          - base-b-a
+          - a-b-base
+          - b-a-base
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
-      BASELINE_SHA: 7981dfc38fbde7edcc11ef36843293b64d96ab08
-      VARIANT_SHA: f9acace32cf3426c920d0bba5c2f25e563ae56ed
+      BASE_REF: 7981dfc38fbde7edcc11ef36843293b64d96ab08
+      A_REF: f9acace32cf3426c920d0bba5c2f25e563ae56ed
+      B_REF: 8afc63c8f57124ff230eeb6a1480f2c2d337d968
     steps:
       - uses: actions/checkout@v4
         with:
@@ -27,13 +36,24 @@ jobs:
 
       - name: Record runner environment
         run: |
-          uname -a
-          lscpu
-          free -h
-          uptime
-          systemd-detect-virt || true
-          cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || true
-          cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq 2>/dev/null || true
+          mkdir -p perf-results
+          {
+            echo "order=${{ matrix.order }}"
+            echo "timestamp=$(date -u +%FT%TZ)"
+            echo
+            uname -a
+            echo
+            lscpu
+            echo
+            free -h
+            echo
+            uptime
+            echo
+            systemd-detect-virt || true
+            echo
+            cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || true
+            cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq 2>/dev/null || true
+          } | tee perf-results/environment.txt
 
       - name: Install build prerequisites
         run: |
@@ -43,63 +63,81 @@ jobs:
             bison libfl-dev libbenchmark-dev libgmock-dev libgtest-dev libtool \
             libz-dev libssl-dev
 
-      - name: Build baseline
+      - name: Build and measure Base / A / B on same runner
+        shell: bash
         run: |
-          # Keep the current benchmark/signoff harness fixed, and switch only
-          # the two production sources under test.
-          git checkout "$BASELINE_SHA" -- \
-            src/groups/bmq/bmqp/bmqp_schemagenerator.cpp \
-            src/groups/bmq/bmqp/bmqp_schemalearner.cpp
-          bin/build-ubuntu.sh
+          set -euo pipefail
 
-      - name: Baseline warmup
-        run: |
-          ./build/blazingmq/tests/bmqp_schemagenerator.t -1 --benchmark_min_time=0.1s --benchmark_repetitions=1
-          ./build/blazingmq/tests/bmqp_schemalearner.t -1 --benchmark_min_time=0.1s --benchmark_repetitions=1
-          ./build/blazingmq/tests/bmqp_schemalearner.t -2 --benchmark_min_time=0.1s --benchmark_repetitions=1
-          ./build/blazingmq/tests/bmqp_schemalearner.t -3 --benchmark_min_time=0.1s --benchmark_repetitions=1
+          source_path="src/groups/bmq/bmqp/bmqp_schemagenerator.cpp"
 
-      - name: Baseline measured
-        run: |
-          mkdir -p perf-results
-          ./build/blazingmq/tests/bmqp_schemagenerator.t -1 --benchmark_min_time=0.3s --benchmark_repetitions=9 --benchmark_report_aggregates_only=true --benchmark_out=perf-results/baseline-generator.json --benchmark_out_format=json
-          ./build/blazingmq/tests/bmqp_schemalearner.t -1 --benchmark_min_time=0.3s --benchmark_repetitions=11 --benchmark_report_aggregates_only=true --benchmark_out=perf-results/baseline-multiplex.json --benchmark_out_format=json
-          ./build/blazingmq/tests/bmqp_schemalearner.t -2 --benchmark_min_time=0.3s --benchmark_repetitions=11 --benchmark_report_aggregates_only=true --benchmark_out=perf-results/baseline-demultiplex.json --benchmark_out_format=json
-          ./build/blazingmq/tests/bmqp_schemalearner.t -3 --benchmark_min_time=0.2s --benchmark_repetitions=7 --benchmark_report_aggregates_only=true --benchmark_out=perf-results/baseline-hit-rate.json --benchmark_out_format=json
-          ./build/blazingmq/tests/bmqp_schemagenerator.t 2 | tee perf-results/baseline-generator-alloc.txt
-          ./build/blazingmq/tests/bmqp_schemalearner.t 8 | tee perf-results/baseline-learner-alloc.txt
+          ref_for() {
+            case "$1" in
+              base) echo "$BASE_REF" ;;
+              a) echo "$A_REF" ;;
+              b) echo "$B_REF" ;;
+              *) return 2 ;;
+            esac
+          }
 
-      - name: Build variant incrementally on same runner
-        run: |
-          git checkout "$VARIANT_SHA" -- \
-            src/groups/bmq/bmqp/bmqp_schemagenerator.cpp \
-            src/groups/bmq/bmqp/bmqp_schemalearner.cpp
-          DIR_THIRDPARTY="$PWD/thirdparty" DIR_BUILD="$PWD/build" DIR_INSTALL="$PWD" cmake --preset ubuntu-x64
-          DIR_THIRDPARTY="$PWD/thirdparty" DIR_BUILD="$PWD/build" DIR_INSTALL="$PWD" cmake --build --preset ubuntu-x64 --target bmqp_schemagenerator.t bmqp_schemalearner.t
+          apply_variant() {
+            local label="$1"
+            local ref
+            ref="$(ref_for "$label")"
+            git checkout "$ref" -- "$source_path"
 
-      - name: Variant warmup
-        run: |
-          ./build/blazingmq/tests/bmqp_schemagenerator.t -1 --benchmark_min_time=0.1s --benchmark_repetitions=1
-          ./build/blazingmq/tests/bmqp_schemalearner.t -1 --benchmark_min_time=0.1s --benchmark_repetitions=1
-          ./build/blazingmq/tests/bmqp_schemalearner.t -2 --benchmark_min_time=0.1s --benchmark_repetitions=1
-          ./build/blazingmq/tests/bmqp_schemalearner.t -3 --benchmark_min_time=0.1s --benchmark_repetitions=1
+            if [[ ! -d thirdparty/bde ]]; then
+              bin/build-ubuntu.sh
+            else
+              DIR_THIRDPARTY="$PWD/thirdparty" \
+              DIR_BUILD="$PWD/build" \
+              DIR_INSTALL="$PWD" \
+                cmake --preset ubuntu-x64
+              DIR_THIRDPARTY="$PWD/thirdparty" \
+              DIR_BUILD="$PWD/build" \
+              DIR_INSTALL="$PWD" \
+                cmake --build --preset ubuntu-x64 --target bmqp_schemagenerator.t
+            fi
+          }
 
-      - name: Variant measured
-        run: |
-          ./build/blazingmq/tests/bmqp_schemagenerator.t -1 --benchmark_min_time=0.3s --benchmark_repetitions=9 --benchmark_report_aggregates_only=true --benchmark_out=perf-results/variant-generator.json --benchmark_out_format=json
-          ./build/blazingmq/tests/bmqp_schemalearner.t -1 --benchmark_min_time=0.3s --benchmark_repetitions=11 --benchmark_report_aggregates_only=true --benchmark_out=perf-results/variant-multiplex.json --benchmark_out_format=json
-          ./build/blazingmq/tests/bmqp_schemalearner.t -2 --benchmark_min_time=0.3s --benchmark_repetitions=11 --benchmark_report_aggregates_only=true --benchmark_out=perf-results/variant-demultiplex.json --benchmark_out_format=json
-          ./build/blazingmq/tests/bmqp_schemalearner.t -3 --benchmark_min_time=0.2s --benchmark_repetitions=7 --benchmark_report_aggregates_only=true --benchmark_out=perf-results/variant-hit-rate.json --benchmark_out_format=json
-          ./build/blazingmq/tests/bmqp_schemagenerator.t 2 | tee perf-results/variant-generator-alloc.txt
-          ./build/blazingmq/tests/bmqp_schemalearner.t 8 | tee perf-results/variant-learner-alloc.txt
+          measure_variant() {
+            local label="$1"
+            echo "===== $label warmup ====="
+            ./build/blazingmq/tests/bmqp_schemagenerator.t -1 \
+              --benchmark_min_time=0.10s \
+              --benchmark_repetitions=1 >/dev/null
 
-      - name: Functional checks on variant
+            echo "===== $label measured ====="
+            ./build/blazingmq/tests/bmqp_schemagenerator.t -1 \
+              --benchmark_min_time=0.20s \
+              --benchmark_repetitions=7 \
+              --benchmark_report_aggregates_only=true \
+              --benchmark_out="perf-results/${label}-generator.json" \
+              --benchmark_out_format=json
+
+            ./build/blazingmq/tests/bmqp_schemagenerator.t 2 \
+              | tee "perf-results/${label}-alloc.txt"
+
+            ./build/blazingmq/tests/bmqp_schemagenerator.t 1
+          }
+
+          IFS='-' read -r first second third <<< "${{ matrix.order }}"
+          for label in "$first" "$second" "$third"; do
+            apply_variant "$label"
+            measure_variant "$label"
+          done
+
+      - name: Save source identities
         run: |
-          ./build/blazingmq/tests/bmqp_schemagenerator.t 1
-          for i in 1 2 3 4 5 6 7; do ./build/blazingmq/tests/bmqp_schemalearner.t "$i"; done
+          {
+            echo "BASE_REF=$BASE_REF"
+            echo "A_REF=$A_REF"
+            echo "B_REF=$B_REF"
+            echo "HARNESS_SHA=$GITHUB_SHA"
+            echo "ORDER=${{ matrix.order }}"
+          } > perf-results/refs.txt
 
       - uses: actions/upload-artifact@v4
         with:
-          name: schema-perf-results
+          name: schema-generator-${{ matrix.order }}
           path: perf-results
           retention-days: 7
