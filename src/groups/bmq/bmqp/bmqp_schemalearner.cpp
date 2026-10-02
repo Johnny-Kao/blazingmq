@@ -201,12 +201,16 @@ SchemaLearner::multiplex(Context& context, const MessagePropertiesInfo& input)
 
     SchemaIdType outputId = k_NO_SCHEMA;
 
-    // Lookup the schema within this source
-    InsertResult        insertResult  = context->d_handles.emplace(inputId,
-                                                           HandlePtr());
+    // Lookup the schema within this source.  Avoid constructing an insertion
+    // candidate on the steady-state hit path.
+    HandlesMap::iterator it = context->d_handles.find(inputId);
+    if (it == context->d_handles.end()) {
+        it = context->d_handles.emplace(inputId, HandlePtr()).first;
+    }
+
     bool                isRecycled    = input.isRecycled();
     bool                isUpToDate    = false;
-    HandlePtr&          contextHandle = insertResult.first->second;
+    HandlePtr&          contextHandle = it->second;
     LRU::const_iterator entryInLRU    = d_lru.end();
     // LRU tracking for 'outputId'
 
@@ -315,11 +319,15 @@ SchemaLearner::demultiplex(Context&                     context,
 
     typedef bsl::pair<HandlesMap::iterator, bool> InsertResult;
 
-    // Lookup the schema within this source
-    InsertResult lookupOrInsert = context->d_handles.emplace(inputId,
-                                                             HandlePtr());
-    bool         isRecycled     = true;
-    HandlePtr&   contextHandle  = lookupOrInsert.first->second;
+    // Lookup the schema within this source.  Avoid constructing an insertion
+    // candidate on the steady-state hit path.
+    HandlesMap::iterator it = context->d_handles.find(inputId);
+    if (it == context->d_handles.end()) {
+        it = context->d_handles.emplace(inputId, HandlePtr()).first;
+    }
+
+    bool       isRecycled    = true;
+    HandlePtr& contextHandle = it->second;
 
     if (contextHandle) {
         if (input.isRecycled()) {
