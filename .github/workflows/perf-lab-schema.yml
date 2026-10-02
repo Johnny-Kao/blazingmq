@@ -39,11 +39,10 @@ jobs:
             bison libfl-dev libbenchmark-dev libgmock-dev libgtest-dev libtool \
             libz-dev libssl-dev
 
-      - name: Build baseline targets only
+      - name: Build baseline
         run: |
           git checkout "$BASELINE_SHA"
-          bin/build-ubuntu.sh --configure-only
-          DIR_THIRDPARTY="$PWD/thirdparty" DIR_BUILD="$PWD/build" DIR_INSTALL="$PWD" cmake --build --preset ubuntu-x64 --target bmqp_schemagenerator.t bmqp_schemalearner.t
+          bin/build-ubuntu.sh
 
       - name: Baseline warmup
         run: |
