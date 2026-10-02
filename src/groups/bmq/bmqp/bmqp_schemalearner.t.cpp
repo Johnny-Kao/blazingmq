@@ -22,6 +22,7 @@
 // BDE
 #include <bdlb_random.h>
 #include <bdlbb_pooledblobbufferfactory.h>
+#include <bslma_testallocator.h>
 #include <bslstl_map.h>
 
 // TEST DRIVER
@@ -365,6 +366,47 @@ static void test6_partialRead()
     }
 }
 
+static void test8_allocatorProfile()
+{
+    bmqtst::TestHelperUtil::ignoreCheckDefAlloc() = true;
+
+    const int hitRates[] = {0, 50, 90, 99, 100};
+    const int numRates = static_cast<int>(sizeof(hitRates) / sizeof(*hitRates));
+
+    for (int r = 0; r < numRates; ++r) {
+        const int hitRate = hitRates[r];
+        bslma::TestAllocator allocator("schemaLearnerProfile");
+
+        bmqp::SchemaLearner learner(&allocator);
+        bmqp::SchemaLearner::Context context = learner.createContext();
+
+        for (int i = 0; i < hitRate; ++i) {
+            bmqp::MessagePropertiesInfo input(true,
+                                              static_cast<SchemaIdType>(i + 1),
+                                              false);
+            learner.multiplex(context, input);
+        }
+
+        const bsls::Types::Int64 blocksBefore = allocator.numBlocksTotal();
+        const bsls::Types::Int64 bytesBefore  = allocator.numBytesTotal();
+        const bsls::Types::Int64 inUseBefore  = allocator.numBytesInUse();
+
+        for (int i = 0; i < 100; ++i) {
+            bmqp::MessagePropertiesInfo input(true,
+                                              static_cast<SchemaIdType>(i + 1),
+                                              false);
+            benchmark::DoNotOptimize(learner.multiplex(context, input)
+                                         .schemaId());
+        }
+
+        cout << "ALLOC_PROFILE multiplex hit_rate=" << hitRate
+             << " blocks=" << allocator.numBlocksTotal() - blocksBefore
+             << " bytes=" << allocator.numBytesTotal() - bytesBefore
+             << " retained=" << allocator.numBytesInUse() - inUseBefore
+             << endl;
+    }
+}
+
 static void test7_removeBeforeRead()
 {
     // Read known schema partially.  Remove one property and then continue
@@ -491,6 +533,41 @@ static void testN1_multiplexHot_GoogleBenchmark(benchmark::State& state)
         benchmark::DoNotOptimize(learner.multiplex(context, input).schemaId());
     }
 }
+static void testN3_multiplexHitRate_GoogleBenchmark(benchmark::State& state)
+{
+    bmqtst::TestHelperUtil::ignoreCheckDefAlloc() = true;
+
+    const int hitRate = static_cast<int>(state.range(0));
+    const int batchSize = 100;
+
+    for (auto _ : state) {
+        state.PauseTiming();
+
+        bmqp::SchemaLearner learner(bmqtst::TestHelperUtil::allocator());
+        bmqp::SchemaLearner::Context context = learner.createContext();
+
+        for (int i = 0; i < hitRate; ++i) {
+            bmqp::MessagePropertiesInfo input(true,
+                                              static_cast<SchemaIdType>(i + 1),
+                                              false);
+            benchmark::DoNotOptimize(learner.multiplex(context, input)
+                                         .schemaId());
+        }
+
+        state.ResumeTiming();
+
+        for (int i = 0; i < batchSize; ++i) {
+            bmqp::MessagePropertiesInfo input(true,
+                                              static_cast<SchemaIdType>(i + 1),
+                                              false);
+            benchmark::DoNotOptimize(learner.multiplex(context, input)
+                                         .schemaId());
+        }
+    }
+
+    state.SetItemsProcessed(state.iterations() * batchSize);
+}
+
 static void testN2_demultiplexHot_GoogleBenchmark(benchmark::State& state)
 {
     bmqtst::TestHelperUtil::ignoreCheckDefAlloc() = true;
@@ -517,6 +594,7 @@ int main(int argc, char* argv[])
 
     switch (_testCase) {
     case 0:
+    case 8: test8_allocatorProfile(); break;
     case 7: test7_removeBeforeRead(); break;
     case 6: test6_partialRead(); break;
     case 5: test5_emptyMPs(); break;
@@ -531,6 +609,15 @@ int main(int argc, char* argv[])
     case -2:
         BMQTST_BENCHMARK_WITH_ARGS(testN2_demultiplexHot,
                                    Unit(benchmark::kNanosecond));
+        break;
+    case -3:
+        BMQTST_BENCHMARK_WITH_ARGS(testN3_multiplexHitRate,
+                                   Arg(0)
+                                       ->Arg(50)
+                                       ->Arg(90)
+                                       ->Arg(99)
+                                       ->Arg(100)
+                                       ->Unit(benchmark::kNanosecond));
         break;
     default: {
         cerr << "WARNING: CASE '" << _testCase << "' NOT FOUND." << endl;
