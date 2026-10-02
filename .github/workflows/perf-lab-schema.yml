@@ -47,7 +47,9 @@ jobs:
         run: |
           # Keep the current benchmark/signoff harness fixed, and switch only
           # the two production sources under test.
-          git checkout "$BASELINE_SHA" --             src/groups/bmq/bmqp/bmqp_schemagenerator.cpp             src/groups/bmq/bmqp/bmqp_schemalearner.cpp
+          git checkout "$BASELINE_SHA" -- \
+            src/groups/bmq/bmqp/bmqp_schemagenerator.cpp \
+            src/groups/bmq/bmqp/bmqp_schemalearner.cpp
           bin/build-ubuntu.sh
 
       - name: Baseline warmup
@@ -55,7 +57,6 @@ jobs:
           ./build/blazingmq/tests/bmqp_schemagenerator.t -1 --benchmark_min_time=0.1s --benchmark_repetitions=1
           ./build/blazingmq/tests/bmqp_schemalearner.t -1 --benchmark_min_time=0.1s --benchmark_repetitions=1
           ./build/blazingmq/tests/bmqp_schemalearner.t -2 --benchmark_min_time=0.1s --benchmark_repetitions=1
-          ./build/blazingmq/tests/bmqp_schemalearner.t -3 --benchmark_min_time=0.1s --benchmark_repetitions=1
           ./build/blazingmq/tests/bmqp_schemalearner.t -3 --benchmark_min_time=0.1s --benchmark_repetitions=1
 
       - name: Baseline measured
@@ -70,7 +71,9 @@ jobs:
 
       - name: Build variant incrementally on same runner
         run: |
-          git checkout "$VARIANT_SHA" --             src/groups/bmq/bmqp/bmqp_schemagenerator.cpp             src/groups/bmq/bmqp/bmqp_schemalearner.cpp
+          git checkout "$VARIANT_SHA" -- \
+            src/groups/bmq/bmqp/bmqp_schemagenerator.cpp \
+            src/groups/bmq/bmqp/bmqp_schemalearner.cpp
           DIR_THIRDPARTY="$PWD/thirdparty" DIR_BUILD="$PWD/build" DIR_INSTALL="$PWD" cmake --preset ubuntu-x64
           DIR_THIRDPARTY="$PWD/thirdparty" DIR_BUILD="$PWD/build" DIR_INSTALL="$PWD" cmake --build --preset ubuntu-x64 --target bmqp_schemagenerator.t bmqp_schemalearner.t
 
@@ -79,6 +82,7 @@ jobs:
           ./build/blazingmq/tests/bmqp_schemagenerator.t -1 --benchmark_min_time=0.1s --benchmark_repetitions=1
           ./build/blazingmq/tests/bmqp_schemalearner.t -1 --benchmark_min_time=0.1s --benchmark_repetitions=1
           ./build/blazingmq/tests/bmqp_schemalearner.t -2 --benchmark_min_time=0.1s --benchmark_repetitions=1
+          ./build/blazingmq/tests/bmqp_schemalearner.t -3 --benchmark_min_time=0.1s --benchmark_repetitions=1
 
       - name: Variant measured
         run: |
