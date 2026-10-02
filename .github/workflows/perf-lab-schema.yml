@@ -9,6 +9,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: schema-perf-signoff
+  cancel-in-progress: true
+
 jobs:
   linux-x86-ab:
     runs-on: ubuntu-latest
@@ -41,7 +45,9 @@ jobs:
 
       - name: Build baseline
         run: |
-          git checkout "$BASELINE_SHA"
+          # Keep the current benchmark/signoff harness fixed, and switch only
+          # the two production sources under test.
+          git checkout "$BASELINE_SHA" --             src/groups/bmq/bmqp/bmqp_schemagenerator.cpp             src/groups/bmq/bmqp/bmqp_schemalearner.cpp
           bin/build-ubuntu.sh
 
       - name: Baseline warmup
@@ -49,6 +55,8 @@ jobs:
           ./build/blazingmq/tests/bmqp_schemagenerator.t -1 --benchmark_min_time=0.1s --benchmark_repetitions=1
           ./build/blazingmq/tests/bmqp_schemalearner.t -1 --benchmark_min_time=0.1s --benchmark_repetitions=1
           ./build/blazingmq/tests/bmqp_schemalearner.t -2 --benchmark_min_time=0.1s --benchmark_repetitions=1
+          ./build/blazingmq/tests/bmqp_schemalearner.t -3 --benchmark_min_time=0.1s --benchmark_repetitions=1
+          ./build/blazingmq/tests/bmqp_schemalearner.t -3 --benchmark_min_time=0.1s --benchmark_repetitions=1
 
       - name: Baseline measured
         run: |
@@ -56,10 +64,13 @@ jobs:
           ./build/blazingmq/tests/bmqp_schemagenerator.t -1 --benchmark_min_time=0.3s --benchmark_repetitions=9 --benchmark_report_aggregates_only=true --benchmark_out=perf-results/baseline-generator.json --benchmark_out_format=json
           ./build/blazingmq/tests/bmqp_schemalearner.t -1 --benchmark_min_time=0.3s --benchmark_repetitions=11 --benchmark_report_aggregates_only=true --benchmark_out=perf-results/baseline-multiplex.json --benchmark_out_format=json
           ./build/blazingmq/tests/bmqp_schemalearner.t -2 --benchmark_min_time=0.3s --benchmark_repetitions=11 --benchmark_report_aggregates_only=true --benchmark_out=perf-results/baseline-demultiplex.json --benchmark_out_format=json
+          ./build/blazingmq/tests/bmqp_schemalearner.t -3 --benchmark_min_time=0.2s --benchmark_repetitions=7 --benchmark_report_aggregates_only=true --benchmark_out=perf-results/baseline-hit-rate.json --benchmark_out_format=json
+          ./build/blazingmq/tests/bmqp_schemagenerator.t 2 | tee perf-results/baseline-generator-alloc.txt
+          ./build/blazingmq/tests/bmqp_schemalearner.t 8 | tee perf-results/baseline-learner-alloc.txt
 
       - name: Build variant incrementally on same runner
         run: |
-          git checkout "$VARIANT_SHA"
+          git checkout "$VARIANT_SHA" --             src/groups/bmq/bmqp/bmqp_schemagenerator.cpp             src/groups/bmq/bmqp/bmqp_schemalearner.cpp
           DIR_THIRDPARTY="$PWD/thirdparty" DIR_BUILD="$PWD/build" DIR_INSTALL="$PWD" cmake --preset ubuntu-x64
           DIR_THIRDPARTY="$PWD/thirdparty" DIR_BUILD="$PWD/build" DIR_INSTALL="$PWD" cmake --build --preset ubuntu-x64 --target bmqp_schemagenerator.t bmqp_schemalearner.t
 
@@ -74,6 +85,9 @@ jobs:
           ./build/blazingmq/tests/bmqp_schemagenerator.t -1 --benchmark_min_time=0.3s --benchmark_repetitions=9 --benchmark_report_aggregates_only=true --benchmark_out=perf-results/variant-generator.json --benchmark_out_format=json
           ./build/blazingmq/tests/bmqp_schemalearner.t -1 --benchmark_min_time=0.3s --benchmark_repetitions=11 --benchmark_report_aggregates_only=true --benchmark_out=perf-results/variant-multiplex.json --benchmark_out_format=json
           ./build/blazingmq/tests/bmqp_schemalearner.t -2 --benchmark_min_time=0.3s --benchmark_repetitions=11 --benchmark_report_aggregates_only=true --benchmark_out=perf-results/variant-demultiplex.json --benchmark_out_format=json
+          ./build/blazingmq/tests/bmqp_schemalearner.t -3 --benchmark_min_time=0.2s --benchmark_repetitions=7 --benchmark_report_aggregates_only=true --benchmark_out=perf-results/variant-hit-rate.json --benchmark_out_format=json
+          ./build/blazingmq/tests/bmqp_schemagenerator.t 2 | tee perf-results/variant-generator-alloc.txt
+          ./build/blazingmq/tests/bmqp_schemalearner.t 8 | tee perf-results/variant-learner-alloc.txt
 
       - name: Functional checks on variant
         run: |
