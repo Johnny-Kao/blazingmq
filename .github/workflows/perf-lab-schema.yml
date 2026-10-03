@@ -1,4 +1,4 @@
-name: Schema Allocator Threshold Causality Lab
+name: Schema Key Strategy Comparison Lab
 
 on:
   push:
@@ -10,11 +10,11 @@ permissions:
   contents: read
 
 concurrency:
-  group: schema-threshold-causality
+  group: schema-key-strategy-comparison
   cancel-in-progress: true
 
 jobs:
-  linux-x86-threshold:
+  linux-x86-comparison:
     strategy:
       fail-fast: false
       matrix:
@@ -28,11 +28,12 @@ jobs:
           - condition: sibling-busy
             order: reverse
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 150
     env:
       BASE_REF: 7981dfc38fbde7edcc11ef36843293b64d96ab08
-      A_REF: f9acace32cf3426c920d0bba5c2f25e563ae56ed
-      B_REF: 8afc63c8f57124ff230eeb6a1480f2c2d337d968
+      L1_REF: f9acace32cf3426c920d0bba5c2f25e563ae56ed
+      V1_REF: 5b3d456becbb66e293df3fffc25b3f94e86526d8
+      V2_REF: e149f00f84e3cff9ccd900fdd291b89fe7eaca75
     steps:
       - uses: actions/checkout@v4
         with:
@@ -45,17 +46,11 @@ jobs:
             echo "condition=${{ matrix.condition }}"
             echo "order=${{ matrix.order }}"
             echo "timestamp=$(date -u +%FT%TZ)"
-            echo
             uname -a
-            echo
             lscpu
-            echo
             free -h
-            echo
             uptime
-            echo
             systemd-detect-virt || true
-            echo
             echo "cpu0_siblings=$(cat /sys/devices/system/cpu/cpu0/topology/thread_siblings_list 2>/dev/null || true)"
             echo "cpu0_core=$(cat /sys/devices/system/cpu/cpu0/topology/core_id 2>/dev/null || true)"
             echo "cpu0_package=$(cat /sys/devices/system/cpu/cpu0/topology/physical_package_id 2>/dev/null || true)"
@@ -79,7 +74,6 @@ jobs:
           siblings="$(cat /sys/devices/system/cpu/cpu0/topology/thread_siblings_list 2>/dev/null || true)"
           sibling="$(echo "$siblings" | tr ',' '\n' | grep -v '^0$' | head -n1 || true)"
           if [[ -z "$sibling" ]]; then
-            echo "No SMT sibling exposed; using CPU 1 as contention control."
             sibling=1
           fi
           echo "$sibling" > perf-results/stress-cpu.txt
@@ -88,30 +82,35 @@ jobs:
           echo $! > perf-results/sibling-stress.pid
           sleep 1
 
-      - name: Build and measure threshold matrix
+      - name: Build and measure all schema-key strategies
         shell: bash
         run: |
           set -euo pipefail
 
-          source_path="src/groups/bmq/bmqp/bmqp_schemagenerator.cpp"
+          cpp="src/groups/bmq/bmqp/bmqp_schemagenerator.cpp"
+          hdr="src/groups/bmq/bmqp/bmqp_schemagenerator.h"
 
           ref_for() {
             case "$1" in
               base) echo "$BASE_REF" ;;
-              a) echo "$A_REF" ;;
-              b) echo "$B_REF" ;;
+              l1) echo "$L1_REF" ;;
+              v1) echo "$V1_REF" ;;
+              v2) echo "$V2_REF" ;;
               *) return 2 ;;
             esac
           }
 
-          apply_config() {
+          apply_variant() {
             local label="$1"
             local buffer="$2"
             local ref
             ref="$(ref_for "$label")"
 
-            git checkout "$ref" -- "$source_path"
-            python3 -c 'import pathlib,re,sys; p=pathlib.Path(sys.argv[1]); s=p.read_text(); s2,n=re.subn(r"LocalSequentialAllocator<1024>", "LocalSequentialAllocator<"+sys.argv[2]+">", s, count=1); n == 1 or (_ for _ in ()).throw(RuntimeError("expected one LocalSequentialAllocator<1024>, found %d" % n)); p.write_text(s2)' "$source_path" "$buffer"
+            git checkout "$ref" -- "$cpp" "$hdr"
+
+            if [[ "$label" == "v1" ]]; then
+              python3 -c 'import pathlib,re,sys; p=pathlib.Path(sys.argv[1]); s=p.read_text(); s2,n=re.subn(r"LocalSequentialAllocator<1024>", "LocalSequentialAllocator<"+sys.argv[2]+">", s, count=1); n == 1 or (_ for _ in ()).throw(RuntimeError("expected one LocalSequentialAllocator<1024>, found %d" % n)); p.write_text(s2)' "$cpp" "$buffer"
+            fi
 
             if [[ ! -d thirdparty/bde ]]; then
               bin/build-ubuntu.sh
@@ -127,7 +126,7 @@ jobs:
             fi
           }
 
-          measure_config() {
+          measure_variant() {
             local label="$1"
             local buffer="$2"
             local stem="${label}-buf${buffer}"
@@ -145,28 +144,41 @@ jobs:
             taskset -c 0 ./build/blazingmq/tests/bmqp_schemagenerator.t 1 >/dev/null
           }
 
+          forward=(
+            "base:1024"
+            "l1:1024"
+            "v1:512"
+            "v1:1024"
+            "v1:2048"
+            "v1:4096"
+            "v1:8192"
+            "v2:1024"
+          )
+
           if [[ "${{ matrix.order }}" == "forward" ]]; then
-            sizes=(512 1024 2048 4096 8192)
-            variants=(base a b)
+            configs=("${forward[@]}")
           else
-            sizes=(8192 4096 2048 1024 512)
-            variants=(b a base)
+            configs=()
+            for ((i=${#forward[@]}-1; i>=0; --i)); do
+              configs+=("${forward[i]}")
+            done
           fi
 
-          for buffer in "${sizes[@]}"; do
-            for label in "${variants[@]}"; do
-              echo "===== condition=${{ matrix.condition }} order=${{ matrix.order }} variant=$label buffer=$buffer ====="
-              apply_config "$label" "$buffer"
-              measure_config "$label" "$buffer"
-            done
+          for config in "${configs[@]}"; do
+            label="${config%%:*}"
+            buffer="${config##*:}"
+            echo "===== condition=${{ matrix.condition }} order=${{ matrix.order }} variant=$label buffer=$buffer ====="
+            apply_variant "$label" "$buffer"
+            measure_variant "$label" "$buffer"
           done
 
       - name: Save source identities
         run: |
           {
             echo "BASE_REF=$BASE_REF"
-            echo "A_REF=$A_REF"
-            echo "B_REF=$B_REF"
+            echo "L1_REF=$L1_REF"
+            echo "V1_REF=$V1_REF"
+            echo "V2_REF=$V2_REF"
             echo "HARNESS_SHA=$GITHUB_SHA"
             echo "CONDITION=${{ matrix.condition }}"
             echo "ORDER=${{ matrix.order }}"
@@ -174,6 +186,6 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: schema-threshold-${{ matrix.condition }}-${{ matrix.order }}
+          name: schema-key-${{ matrix.condition }}-${{ matrix.order }}
           path: perf-results
           retention-days: 7
