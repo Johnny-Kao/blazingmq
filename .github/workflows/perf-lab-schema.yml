@@ -1,4 +1,4 @@
-name: Schema PR2 Builder Screen
+name: Schema Final Staged Validation
 
 on:
   push:
@@ -10,11 +10,11 @@ permissions:
   contents: read
 
 concurrency:
-  group: schema-pr2-builder-screen
+  group: schema-final-staged-validation
   cancel-in-progress: true
 
 jobs:
-  screen:
+  validate:
     strategy:
       fail-fast: false
       matrix:
@@ -30,10 +30,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 180
     env:
-      L1_REF: a8cf6ece379cc7e2099ae43ad7c42712a2e15d5b
-      P2A_REF: bf59be3b3daaa939dfc86e3cb93697312e769c42
-      P2C_REF: acd4ad66a2ce5508ba99a1b354f8885ffe20443c
-      P2D_REF: 7891434590dbb7923263a51c615cfd85c07f27a8
+      BASE_REF: 88bbf562b190c04ca4f33edaa9b6dcccb25a08a6
+      PR1_REF: 8ae10f663
+      PRS2_REF: 4ab084ae9
 
     steps:
       - uses: actions/checkout@v4
@@ -51,6 +50,7 @@ jobs:
             lscpu
             free -h
             systemd-detect-virt || true
+            echo "cpu0_siblings=$(cat /sys/devices/system/cpu/cpu0/topology/thread_siblings_list 2>/dev/null || true)"
           } | tee perf-results/environment.txt
 
       - name: Install build prerequisites
@@ -69,11 +69,12 @@ jobs:
           siblings="$(cat /sys/devices/system/cpu/cpu0/topology/thread_siblings_list 2>/dev/null || true)"
           sibling="$(echo "$siblings" | tr ',' '\n' | grep -v '^0$' | head -n1 || true)"
           if [[ -z "$sibling" ]]; then sibling=1; fi
+          echo "$sibling" > perf-results/stress-cpu.txt
           nohup taskset -c "$sibling" sh -c 'while :; do :; done' >/dev/null 2>&1 &
           echo $! > perf-results/sibling-stress.pid
           sleep 1
 
-      - name: Build and measure builders
+      - name: Build and measure staged candidates
         shell: bash
         run: |
           set -euo pipefail
@@ -82,10 +83,9 @@ jobs:
 
           ref_for() {
             case "$1" in
-              l1)  echo "$L1_REF" ;;
-              p2a) echo "$P2A_REF" ;;
-              p2c) echo "$P2C_REF" ;;
-              p2d) echo "$P2D_REF" ;;
+              base) echo "$BASE_REF" ;;
+              pr1) echo "$PR1_REF" ;;
+              prs2) echo "$PRS2_REF" ;;
               *) return 2 ;;
             esac
           }
@@ -93,6 +93,7 @@ jobs:
           build_and_measure() {
             local label="$1"
             local ref="$(ref_for "$label")"
+
             git checkout "$ref" -- "$cpp" "$hdr"
 
             if [[ ! -d thirdparty/bde ]]; then
@@ -121,9 +122,9 @@ jobs:
           }
 
           if [[ "${{ matrix.order }}" == "forward" ]]; then
-            configs=(l1 p2a p2c p2d)
+            configs=(base pr1 prs2)
           else
-            configs=(p2d p2c p2a l1)
+            configs=(prs2 pr1 base)
           fi
 
           for label in "${configs[@]}"; do
@@ -131,8 +132,19 @@ jobs:
             build_and_measure "$label"
           done
 
+      - name: Save refs
+        run: |
+          {
+            echo "BASE_REF=$BASE_REF"
+            echo "PR1_REF=$PR1_REF"
+            echo "PRS2_REF=$PRS2_REF"
+            echo "HARNESS_SHA=$GITHUB_SHA"
+            echo "CONDITION=${{ matrix.condition }}"
+            echo "ORDER=${{ matrix.order }}"
+          } > perf-results/refs.txt
+
       - uses: actions/upload-artifact@v4
         with:
-          name: schema-pr2-builder-${{ matrix.condition }}-${{ matrix.order }}
+          name: schema-final-staged-${{ matrix.condition }}-${{ matrix.order }}
           path: perf-results
-          retention-days: 7
+          retention-days: 14
