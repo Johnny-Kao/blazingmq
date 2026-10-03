@@ -82,10 +82,17 @@ SchemaGenerator::getSchemaId(const MessageProperties* mps)
         return MessagePropertiesInfo();  // RETURN
     }
 
-    bdlma::LocalSequentialAllocator<1024> localAllocator(d_allocator_p);
-    MessagePropertiesIterator             it(mps);
-    bsl::string                           key(&localAllocator);
+    bsl::size_t keyLength = 0;
+    MessagePropertiesIterator sizeIt(mps);
+    while (sizeIt.hasNext()) {
+        keyLength += 1 + sizeIt.name().size();
+    }
 
+    bdlma::LocalSequentialAllocator<1024> localAllocator(d_allocator_p);
+    bsl::string                           key(&localAllocator);
+    key.reserve(keyLength);
+
+    MessagePropertiesIterator it(mps);
     while (it.hasNext()) {
         key += '_';
         key += it.name();
