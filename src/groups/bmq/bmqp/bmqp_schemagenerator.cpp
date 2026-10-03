@@ -20,10 +20,54 @@
 
 // BDE
 #include <bdlma_localsequentialallocator.h>
+#include <bslh_defaulthashalgorithm.h>
 #include <bsl_utility.h>
 
 namespace BloombergLP {
 namespace bmqp {
+
+namespace {
+
+bsl::size_t fingerprint(const MessageProperties* mps)
+{
+    bslh::DefaultHashAlgorithm hash;
+    MessagePropertiesIterator  it(mps);
+    const char                 delimiter = '_';
+
+    while (it.hasNext()) {
+        hash(&delimiter, 1);
+        const bsl::string& name = it.name();
+        hash(name.data(), name.size());
+    }
+
+    return static_cast<bsl::size_t>(hash.computeHash());
+}
+
+bool matchesKey(const bsl::string& key, const MessageProperties* mps)
+{
+    MessagePropertiesIterator it(mps);
+    bsl::size_t                position = 0;
+
+    while (it.hasNext()) {
+        const bsl::string& name = it.name();
+
+        if (position >= key.size() || key[position] != '_') {
+            return false;
+        }
+        ++position;
+
+        if (position + name.size() > key.size() ||
+            0 != key.compare(position, name.size(), name)) {
+            return false;
+        }
+
+        position += name.size();
+    }
+
+    return position == key.size();
+}
+
+}  // close unnamed namespace
 
 // ===============================
 // struct SchemaGenerator::Context
@@ -35,6 +79,9 @@ struct SchemaGenerator::Context {
     SchemaIdType d_id;
     // The generated id.
 
+    bsl::size_t d_fingerprint;
+    // Fingerprint of the canonical key.
+
     LRU::const_iterator d_listIterator;
     // Iterator in the list of keys which assists in
     // selecting least recently used Context.
@@ -45,6 +92,7 @@ struct SchemaGenerator::Context {
 // CREATORS
 inline SchemaGenerator::Context::Context(const LRU::const_iterator& cit)
 : d_id(k_NO_SCHEMA)
+, d_fingerprint(0)
 , d_listIterator(cit)
 {
     // NOTHING
@@ -60,6 +108,7 @@ SchemaGenerator::SchemaGenerator(bslma::Allocator* basicAllocator)
 , d_capacity(k_MAX_SCHEMA)
 , d_currentId(0)
 , d_contextMap(d_allocator_p)
+, d_fingerprintMap(d_allocator_p)
 , d_lru(d_allocator_p)
 , d_lock(bsls::SpinLock::s_unlocked)
 {
@@ -80,6 +129,38 @@ SchemaGenerator::getSchemaId(const MessageProperties* mps)
 
     if (mps == 0 || mps->numProperties() == 0) {
         return MessagePropertiesInfo();  // RETURN
+    }
+
+    const bsl::size_t schemaFingerprint = fingerprint(mps);
+
+    {
+        bsls::SpinLockGuard guard(&d_lock);  // LOCK
+
+        bsl::pair<FingerprintMap::iterator, FingerprintMap::iterator> range =
+            d_fingerprintMap.equal_range(schemaFingerprint);
+
+        for (FingerprintMap::iterator fit = range.first; fit != range.second;
+             ++fit) {
+            if (!matchesKey(*fit->second, mps)) {
+                continue;
+            }
+
+            ContextMap::iterator found = d_contextMap.find(*fit->second);
+            BSLS_ASSERT_OPT(found != d_contextMap.end());
+
+            Context&            context = found->second;
+            LRU::const_iterator current = context.d_listIterator;
+
+            BSLS_ASSERT_OPT(current != d_lru.end());
+            BSLS_ASSERT_OPT(context.d_id != k_NO_SCHEMA);
+
+            if (--d_lru.end() != current) {
+                d_lru.splice(d_lru.end(), d_lru, current);
+            }
+
+            context.d_listIterator = current;
+            return MessagePropertiesInfo(true, context.d_id, false);  // RETURN
+        }
     }
 
     bsl::size_t keyLength = 0;
@@ -127,6 +208,18 @@ SchemaGenerator::getSchemaId(const MessageProperties* mps)
 
             result = recycled->second.d_id;
 
+            bsl::pair<FingerprintMap::iterator, FingerprintMap::iterator>
+                recycledRange = d_fingerprintMap.equal_range(
+                    recycled->second.d_fingerprint);
+            for (FingerprintMap::iterator fit = recycledRange.first;
+                 fit != recycledRange.second;
+                 ++fit) {
+                if (fit->second == &recycled->first) {
+                    d_fingerprintMap.erase(fit);
+                    break;
+                }
+            }
+
             // Erase recycled context
             d_contextMap.erase(recycled);
             d_lru.pop_front();
@@ -135,7 +228,10 @@ SchemaGenerator::getSchemaId(const MessageProperties* mps)
         BSLS_ASSERT_OPT(result != k_NO_SCHEMA);
 
         // Initialize newly allocated 'Context'
-        insertOrLookup.first->second.d_id = result;
+        insertOrLookup.first->second.d_id          = result;
+        insertOrLookup.first->second.d_fingerprint = schemaFingerprint;
+        d_fingerprintMap.emplace(schemaFingerprint,
+                                 &insertOrLookup.first->first);
         // Start tracking it in LRU
         d_lru.push_back(key);
         current = --d_lru.end();

@@ -101,6 +101,8 @@ class SchemaGenerator {
 
     typedef bsl::list<Key> LRU;
 
+    typedef bsl::unordered_multimap<bsl::size_t, const Key*> FingerprintMap;
+
   private:
     // PRIVATE DATA
     bslma::Allocator* d_allocator_p;
@@ -113,6 +115,11 @@ class SchemaGenerator {
 
     ContextMap d_contextMap;
     // information about each Schema id
+
+    FingerprintMap d_fingerprintMap;
+    // Fingerprint to canonical key index used to avoid materializing a key
+    // on steady-state hits.  Collisions are verified against the canonical
+    // key before a schema id is reused.
 
     LRU d_lru;
     // List of all keys in the order of their use.
