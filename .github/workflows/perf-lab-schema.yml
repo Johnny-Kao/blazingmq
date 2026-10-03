@@ -1,4 +1,4 @@
-name: Schema Final Convergence Lab
+name: Schema L1 Final Signoff
 
 on:
   push:
@@ -10,31 +10,28 @@ permissions:
   contents: read
 
 concurrency:
-  group: schema-final-convergence
+  group: schema-l1-final-signoff
   cancel-in-progress: true
 
 jobs:
-  linux-x86-convergence:
+  linux-x86-signoff:
     strategy:
       fail-fast: false
       matrix:
         include:
           - condition: idle
-            order: forward
+            order: base-l1
           - condition: idle
-            order: reverse
+            order: l1-base
           - condition: sibling-busy
-            order: forward
+            order: base-l1
           - condition: sibling-busy
-            order: reverse
+            order: l1-base
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 150
     env:
-      BASE_REF: 7981dfc38fbde7edcc11ef36843293b64d96ab08
-      L1_REF: f9acace32cf3426c920d0bba5c2f25e563ae56ed
-      V1_REF: 5b3d456becbb66e293df3fffc25b3f94e86526d8
-      V2_REF: e149f00f84e3cff9ccd900fdd291b89fe7eaca75
-      PHASE_REF: dcde8d6dd4b5d8ce2a5158144b8582dd6fec57fb
+      BASE_REF: 88bbf562b190c04ca4f33edaa9b6dcccb25a08a6
+      L1_REF: a8cf6ece379cc7e2099ae43ad7c42712a2e15d5b
     steps:
       - uses: actions/checkout@v4
         with:
@@ -53,8 +50,6 @@ jobs:
             uptime
             systemd-detect-virt || true
             echo "cpu0_siblings=$(cat /sys/devices/system/cpu/cpu0/topology/thread_siblings_list 2>/dev/null || true)"
-            echo "cpu0_core=$(cat /sys/devices/system/cpu/cpu0/topology/core_id 2>/dev/null || true)"
-            echo "cpu0_package=$(cat /sys/devices/system/cpu/cpu0/topology/physical_package_id 2>/dev/null || true)"
           } | tee perf-results/environment.txt
 
       - name: Install build prerequisites
@@ -72,62 +67,40 @@ jobs:
           set -euo pipefail
           siblings="$(cat /sys/devices/system/cpu/cpu0/topology/thread_siblings_list 2>/dev/null || true)"
           sibling="$(echo "$siblings" | tr ',' '\n' | grep -v '^0$' | head -n1 || true)"
-          if [[ -z "$sibling" ]]; then
-            sibling=1
-          fi
+          if [[ -z "$sibling" ]]; then sibling=1; fi
           echo "$sibling" > perf-results/stress-cpu.txt
-          nohup taskset -c "$sibling" sh -c 'while :; do :; done' \
-            > perf-results/sibling-stress.log 2>&1 &
+          nohup taskset -c "$sibling" sh -c 'while :; do :; done' > perf-results/sibling-stress.log 2>&1 &
           echo $! > perf-results/sibling-stress.pid
           sleep 1
 
-      - name: Build and measure final strategy matrix
+      - name: Build and compare latest upstream vs clean L1
         shell: bash
         run: |
           set -euo pipefail
-
           cpp="src/groups/bmq/bmqp/bmqp_schemagenerator.cpp"
           hdr="src/groups/bmq/bmqp/bmqp_schemagenerator.h"
 
-          ref_for() {
-            case "$1" in
-              base) echo "$BASE_REF" ;;
-              l1) echo "$L1_REF" ;;
-              v1) echo "$V1_REF" ;;
-              v2) echo "$V2_REF" ;;
-              *) return 2 ;;
-            esac
-          }
-
           build_variant() {
             local label="$1"
-            local ref
-            ref="$(ref_for "$label")"
-
+            local ref="$2"
             git checkout "$ref" -- "$cpp" "$hdr"
-
-            if [[ "$label" == "v1" ]]; then
-              python3 -c 'import pathlib,re; p=pathlib.Path("'"$cpp"'"); s=p.read_text(); s2,n=re.subn(r"LocalSequentialAllocator<1024>", "LocalSequentialAllocator<4096>", s, count=1); n == 1 or (_ for _ in ()).throw(RuntimeError("expected one local allocator")); p.write_text(s2)'
-            fi
 
             if [[ ! -d thirdparty/bde ]]; then
               bin/build-ubuntu.sh
             else
-              DIR_THIRDPARTY="$PWD/thirdparty" \
-              DIR_BUILD="$PWD/build" \
-              DIR_INSTALL="$PWD" \
-                cmake --preset ubuntu-x64
-              DIR_THIRDPARTY="$PWD/thirdparty" \
-              DIR_BUILD="$PWD/build" \
-              DIR_INSTALL="$PWD" \
+              DIR_THIRDPARTY="$PWD/thirdparty" DIR_BUILD="$PWD/build" DIR_INSTALL="$PWD" cmake --preset ubuntu-x64
+              DIR_THIRDPARTY="$PWD/thirdparty" DIR_BUILD="$PWD/build" DIR_INSTALL="$PWD" \
                 cmake --build --preset ubuntu-x64 --target bmqp_schemagenerator.t
             fi
-          }
 
-          measure_variant() {
-            local label="$1"
+            ./build/blazingmq/tests/bmqp_schemagenerator.t 1 > "perf-results/${label}-correctness.txt"
 
-            ./build/blazingmq/tests/bmqp_schemagenerator.t 1 >/dev/null
+            taskset -c 0 ./build/blazingmq/tests/bmqp_schemagenerator.t -1 \
+              --benchmark_min_time=0.20s \
+              --benchmark_repetitions=7 \
+              --benchmark_report_aggregates_only=true \
+              --benchmark_out="perf-results/${label}-hot.json" \
+              --benchmark_out_format=json >/dev/null
 
             /usr/bin/time -v ./build/blazingmq/tests/bmqp_schemagenerator.t 3 \
               > "perf-results/${label}-convergence.txt" \
@@ -137,54 +110,19 @@ jobs:
               > "perf-results/${label}-alloc.txt"
           }
 
-          forward=(base l1 v1 v2)
-
-          if [[ "${{ matrix.order }}" == "forward" ]]; then
-            configs=("${forward[@]}")
+          if [[ "${{ matrix.order }}" == "base-l1" ]]; then
+            build_variant base "$BASE_REF"
+            build_variant l1 "$L1_REF"
           else
-            configs=()
-            for ((i=${#forward[@]}-1; i>=0; --i)); do
-              configs+=("${forward[i]}")
-            done
+            build_variant l1 "$L1_REF"
+            build_variant base "$BASE_REF"
           fi
 
-          for label in "${configs[@]}"; do
-            echo "===== condition=${{ matrix.condition }} order=${{ matrix.order }} variant=$label ====="
-            build_variant "$label"
-            measure_variant "$label"
-          done
-
-      - name: Run V2 phase attribution
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          git checkout "$PHASE_REF" -- \
-            src/groups/bmq/bmqp/bmqp_schemagenerator.cpp \
-            src/groups/bmq/bmqp/bmqp_schemagenerator.h \
-            src/groups/bmq/bmqp/bmqp_schemagenerator.t.cpp
-
-          DIR_THIRDPARTY="$PWD/thirdparty" \
-          DIR_BUILD="$PWD/build" \
-          DIR_INSTALL="$PWD" \
-            cmake --preset ubuntu-x64
-          DIR_THIRDPARTY="$PWD/thirdparty" \
-          DIR_BUILD="$PWD/build" \
-          DIR_INSTALL="$PWD" \
-            cmake --build --preset ubuntu-x64 --target bmqp_schemagenerator.t
-
-          taskset -c 0 ./build/blazingmq/tests/bmqp_schemagenerator.t 4 \
-            > perf-results/v2-phase-attribution.txt
-
-      - name: Save source identities
+      - name: Save identities
         run: |
           {
             echo "BASE_REF=$BASE_REF"
             echo "L1_REF=$L1_REF"
-            echo "V1_REF=$V1_REF"
-            echo "V1_LOCAL_BUFFER=4096"
-            echo "V2_REF=$V2_REF"
-            echo "PHASE_REF=$PHASE_REF"
             echo "HARNESS_SHA=$GITHUB_SHA"
             echo "CONDITION=${{ matrix.condition }}"
             echo "ORDER=${{ matrix.order }}"
@@ -192,6 +130,6 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: schema-final-${{ matrix.condition }}-${{ matrix.order }}
+          name: schema-l1-signoff-${{ matrix.condition }}-${{ matrix.order }}
           path: perf-results
           retention-days: 7
