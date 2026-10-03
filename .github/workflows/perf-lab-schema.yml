@@ -1,4 +1,4 @@
-name: Schema L1 Nine-Runner Confirmation
+name: Schema PR2 Architecture Screen
 
 on:
   push:
@@ -10,88 +10,48 @@ permissions:
   contents: read
 
 concurrency:
-  group: schema-l1-nine-runner-confirmation
+  group: schema-pr2-architecture-screen
   cancel-in-progress: true
 
 jobs:
-  confirm:
+  screen:
     strategy:
       fail-fast: false
-      max-parallel: 9
       matrix:
         include:
-          - round: 1
-            slot: A
-            order: base-l1
-          - round: 1
-            slot: B
-            order: l1-base
-          - round: 1
-            slot: C
-            order: abab
-          - round: 2
-            slot: A
-            order: l1-base
-          - round: 2
-            slot: B
-            order: abab
-          - round: 2
-            slot: C
-            order: base-l1
-          - round: 3
-            slot: A
-            order: abab
-          - round: 3
-            slot: B
-            order: base-l1
-          - round: 3
-            slot: C
-            order: l1-base
-
+          - condition: idle
+            order: forward
+          - condition: idle
+            order: reverse
+          - condition: sibling-busy
+            order: forward
+          - condition: sibling-busy
+            order: reverse
     runs-on: ubuntu-latest
     timeout-minutes: 180
     env:
-      BASE_REF: 88bbf562b190c04ca4f33edaa9b6dcccb25a08a6
       L1_REF: a8cf6ece379cc7e2099ae43ad7c42712a2e15d5b
+      V1_REF: cc05afb246ea641c081f211ef0777bec3f8b0b0e
+      P2A_REF: bf59be3b3daaa939dfc86e3cb93697312e769c42
+      P2B_REF: c262815e138121c87433c18386598ff32719f3f3
 
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Record independent runner identity
-        shell: bash
+      - name: Record runner environment
         run: |
-          set -euo pipefail
           mkdir -p perf-results
           {
-            echo "round=${{ matrix.round }}"
-            echo "slot=${{ matrix.slot }}"
+            echo "condition=${{ matrix.condition }}"
             echo "order=${{ matrix.order }}"
-            echo "runner_name=$RUNNER_NAME"
-            echo "runner_os=$RUNNER_OS"
-            echo "runner_arch=$RUNNER_ARCH"
-            echo "image_os=${ImageOS:-unknown}"
-            echo "image_version=${ImageVersion:-unknown}"
             echo "timestamp=$(date -u +%FT%TZ)"
-            echo
             uname -a
-            echo
             lscpu
-            echo
             free -h
-            echo
-            grep -m1 'model name' /proc/cpuinfo || true
-            grep -m1 'vendor_id' /proc/cpuinfo || true
-            grep -m1 'cpu family' /proc/cpuinfo || true
-            grep -m1 '^model[[:space:]]' /proc/cpuinfo || true
-            grep -m1 'stepping' /proc/cpuinfo || true
-            echo "cpu0_siblings=$(cat /sys/devices/system/cpu/cpu0/topology/thread_siblings_list 2>/dev/null || true)"
-            echo "cpu0_core=$(cat /sys/devices/system/cpu/cpu0/topology/core_id 2>/dev/null || true)"
-            echo "cpu0_package=$(cat /sys/devices/system/cpu/cpu0/topology/physical_package_id 2>/dev/null || true)"
-            echo
             systemd-detect-virt || true
-            uptime
+            echo "cpu0_siblings=$(cat /sys/devices/system/cpu/cpu0/topology/thread_siblings_list 2>/dev/null || true)"
           } | tee perf-results/environment.txt
 
       - name: Install build prerequisites
@@ -102,16 +62,40 @@ jobs:
             bison libfl-dev libbenchmark-dev libgmock-dev libgtest-dev libtool \
             libz-dev libssl-dev util-linux time
 
-      - name: Run paired confirmation sequence
+      - name: Start SMT sibling pressure when requested
+        if: matrix.condition == 'sibling-busy'
+        shell: bash
+        run: |
+          set -euo pipefail
+          siblings="$(cat /sys/devices/system/cpu/cpu0/topology/thread_siblings_list 2>/dev/null || true)"
+          sibling="$(echo "$siblings" | tr ',' '\n' | grep -v '^0$' | head -n1 || true)"
+          if [[ -z "$sibling" ]]; then sibling=1; fi
+          echo "$sibling" > perf-results/stress-cpu.txt
+          nohup taskset -c "$sibling" sh -c 'while :; do :; done' > perf-results/sibling-stress.log 2>&1 &
+          echo $! > perf-results/sibling-stress.pid
+          sleep 1
+
+      - name: Build and measure PR2 candidates
         shell: bash
         run: |
           set -euo pipefail
           cpp="src/groups/bmq/bmqp/bmqp_schemagenerator.cpp"
           hdr="src/groups/bmq/bmqp/bmqp_schemagenerator.h"
 
+          ref_for() {
+            case "$1" in
+              l1)  echo "$L1_REF" ;;
+              v1)  echo "$V1_REF" ;;
+              p2a) echo "$P2A_REF" ;;
+              p2b) echo "$P2B_REF" ;;
+              *) return 2 ;;
+            esac
+          }
+
           build_and_measure() {
             local label="$1"
-            local ref="$2"
+            local ref
+            ref="$(ref_for "$label")"
 
             git checkout "$ref" -- "$cpp" "$hdr"
 
@@ -123,14 +107,13 @@ jobs:
                 cmake --build --preset ubuntu-x64 --target bmqp_schemagenerator.t
             fi
 
-            ./build/blazingmq/tests/bmqp_schemagenerator.t 1 \
-              > "perf-results/${label}-correctness.txt"
+            ./build/blazingmq/tests/bmqp_schemagenerator.t 1 > "perf-results/${label}-correctness.txt"
 
             taskset -c 0 ./build/blazingmq/tests/bmqp_schemagenerator.t -1 \
               --benchmark_min_time=0.20s \
               --benchmark_repetitions=7 \
               --benchmark_report_aggregates_only=true \
-              --benchmark_out="perf-results/${label}-hot.json" \
+              --benchmark_out="perf-results/${label}-cliff-grid.json" \
               --benchmark_out_format=json >/dev/null
 
             /usr/bin/time -v ./build/blazingmq/tests/bmqp_schemagenerator.t 3 \
@@ -141,40 +124,32 @@ jobs:
               > "perf-results/${label}-alloc.txt"
           }
 
-          case "${{ matrix.order }}" in
-            base-l1)
-              build_and_measure base1 "$BASE_REF"
-              build_and_measure l1_1 "$L1_REF"
-              ;;
-            l1-base)
-              build_and_measure l1_1 "$L1_REF"
-              build_and_measure base1 "$BASE_REF"
-              ;;
-            abab)
-              build_and_measure base1 "$BASE_REF"
-              build_and_measure l1_1 "$L1_REF"
-              build_and_measure base2 "$BASE_REF"
-              build_and_measure l1_2 "$L1_REF"
-              ;;
-            *)
-              echo "unknown order" >&2
-              exit 2
-              ;;
-          esac
+          forward=(l1 v1 p2a p2b)
+          if [[ "${{ matrix.order }}" == "forward" ]]; then
+            configs=("${forward[@]}")
+          else
+            configs=(p2b p2a v1 l1)
+          fi
+
+          for label in "${configs[@]}"; do
+            echo "===== ${{ matrix.condition }} / ${{ matrix.order }} / $label ====="
+            build_and_measure "$label"
+          done
 
       - name: Save identities
         run: |
           {
-            echo "BASE_REF=$BASE_REF"
             echo "L1_REF=$L1_REF"
+            echo "V1_REF=$V1_REF"
+            echo "P2A_REF=$P2A_REF"
+            echo "P2B_REF=$P2B_REF"
             echo "HARNESS_SHA=$GITHUB_SHA"
-            echo "ROUND=${{ matrix.round }}"
-            echo "SLOT=${{ matrix.slot }}"
+            echo "CONDITION=${{ matrix.condition }}"
             echo "ORDER=${{ matrix.order }}"
           } > perf-results/refs.txt
 
       - uses: actions/upload-artifact@v4
         with:
-          name: schema-confirm-r${{ matrix.round }}-${{ matrix.slot }}-${{ matrix.order }}
+          name: schema-pr2-screen-${{ matrix.condition }}-${{ matrix.order }}
           path: perf-results
           retention-days: 7
