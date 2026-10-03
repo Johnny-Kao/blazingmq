@@ -21,7 +21,9 @@
 // BDE
 #include <bdlma_localsequentialallocator.h>
 #include <bsl_cstring.h>
+#include <bsl_limits.h>
 #include <bsl_utility.h>
+#include <bslma_deallocatorguard.h>
 
 namespace BloombergLP {
 namespace bmqp {
@@ -100,16 +102,25 @@ SchemaGenerator::getSchemaId(const MessageProperties* mps)
 
         if (required > capacity) {
             bsl::size_t newCapacity = capacity;
+            const bsl::size_t maxCapacity =
+                bsl::numeric_limits<bsl::size_t>::max();
+
             while (newCapacity < required) {
+                if (newCapacity > maxCapacity / 2) {
+                    newCapacity = required;
+                    break;
+                }
                 newCapacity *= 2;
             }
 
             char *next = static_cast<char *>(
                 d_allocator_p->allocate(newCapacity));
             bsl::memcpy(next, buffer, size);
+
             if (dynamicBuffer) {
                 d_allocator_p->deallocate(dynamicBuffer);
             }
+
             dynamicBuffer = next;
             buffer        = next;
             capacity      = newCapacity;
@@ -121,10 +132,15 @@ SchemaGenerator::getSchemaId(const MessageProperties* mps)
     }
 
     bdlma::LocalSequentialAllocator<1024> localAllocator(d_allocator_p);
-    bsl::string key(buffer, size, &localAllocator);
+    bsl::string key(&localAllocator);
 
     if (dynamicBuffer) {
-        d_allocator_p->deallocate(dynamicBuffer);
+        bslma::DeallocatorGuard<bslma::Allocator> guard(dynamicBuffer,
+                                                        d_allocator_p);
+        key.assign(buffer, size);
+    }
+    else {
+        key.assign(buffer, size);
     }
 
     typedef bsl::pair<ContextMap::iterator, bool> InsertOrLookup;
