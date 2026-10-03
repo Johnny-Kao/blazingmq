@@ -1,4 +1,4 @@
-name: Schema Local-Buffer Threshold Lab
+name: Schema Allocator Threshold Causality Lab
 
 on:
   push:
@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: schema-local-buffer-threshold
+  group: schema-threshold-causality
   cancel-in-progress: true
 
 jobs:
@@ -18,15 +18,21 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        order:
-          - a1024-a512-a2048-a4096-exact1024-heap-heapreserve
-          - heapreserve-heap-exact1024-a4096-a2048-a512-a1024
-          - a2048-a4096-a1024-a512-heapreserve-exact1024-heap
-          - heap-a512-exact1024-a2048-a1024-heapreserve-a4096
+        include:
+          - condition: idle
+            order: forward
+          - condition: idle
+            order: reverse
+          - condition: sibling-busy
+            order: forward
+          - condition: sibling-busy
+            order: reverse
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
+      BASE_REF: 7981dfc38fbde7edcc11ef36843293b64d96ab08
       A_REF: f9acace32cf3426c920d0bba5c2f25e563ae56ed
+      B_REF: 8afc63c8f57124ff230eeb6a1480f2c2d337d968
     steps:
       - uses: actions/checkout@v4
         with:
@@ -36,6 +42,7 @@ jobs:
         run: |
           mkdir -p perf-results
           {
+            echo "condition=${{ matrix.condition }}"
             echo "order=${{ matrix.order }}"
             echo "timestamp=$(date -u +%FT%TZ)"
             echo
@@ -43,15 +50,17 @@ jobs:
             echo
             lscpu
             echo
-            lscpu -e=CPU,CORE,SOCKET,NODE,ONLINE,MAXMHZ,MINMHZ 2>/dev/null || true
-            echo
             free -h
             echo
             uptime
             echo
             systemd-detect-virt || true
             echo
-            grep -E 'model name|cpu MHz|siblings|cpu cores' /proc/cpuinfo | head -n 32 || true
+            echo "cpu0_siblings=$(cat /sys/devices/system/cpu/cpu0/topology/thread_siblings_list 2>/dev/null || true)"
+            echo "cpu0_core=$(cat /sys/devices/system/cpu/cpu0/topology/core_id 2>/dev/null || true)"
+            echo "cpu0_package=$(cat /sys/devices/system/cpu/cpu0/topology/physical_package_id 2>/dev/null || true)"
+            cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || true
+            cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq 2>/dev/null || true
           } | tee perf-results/environment.txt
 
       - name: Install build prerequisites
@@ -60,67 +69,59 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             autoconf automake build-essential gdb cmake ninja-build pkg-config \
             bison libfl-dev libbenchmark-dev libgmock-dev libgtest-dev libtool \
-            libz-dev libssl-dev
+            libz-dev libssl-dev util-linux
 
-      - name: Build and measure threshold variants on same runner
+      - name: Start SMT sibling pressure when requested
+        if: matrix.condition == 'sibling-busy'
         shell: bash
         run: |
           set -euo pipefail
+          siblings="$(cat /sys/devices/system/cpu/cpu0/topology/thread_siblings_list 2>/dev/null || true)"
+          sibling="$(echo "$siblings" | tr ',' '\n' | grep -v '^0$' | head -n1 || true)"
+          if [[ -z "$sibling" ]]; then
+            echo "No SMT sibling exposed; using CPU 1 as contention control."
+            sibling=1
+          fi
+          echo "$sibling" > perf-results/stress-cpu.txt
+          nohup taskset -c "$sibling" sh -c 'while :; do :; done' \
+            > perf-results/sibling-stress.log 2>&1 &
+          echo $! > perf-results/sibling-stress.pid
+          sleep 1
+
+      - name: Build and measure threshold matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+
           source_path="src/groups/bmq/bmqp/bmqp_schemagenerator.cpp"
 
-          write_variant() {
-            local label="$1"
-            git checkout "$A_REF" -- "$source_path"
-            LABEL="$label" python3 - <<'PY'
-          import os
-          from pathlib import Path
-          p = Path("src/groups/bmq/bmqp/bmqp_schemagenerator.cpp")
-          s = p.read_text()
-          label = os.environ["LABEL"]
-          
-          if label.startswith("a") and label[1:].isdigit():
-              size = label[1:]
-              s = s.replace("LocalSequentialAllocator<1024>", f"LocalSequentialAllocator<{size}>", 1)
-          elif label == "heap":
-              s = s.replace(
-                  "    bdlma::LocalSequentialAllocator<1024> localAllocator(d_allocator_p);\n"
-                  "    MessagePropertiesIterator             it(mps);\n"
-                  "    bsl::string                           key(&localAllocator);",
-                  "    MessagePropertiesIterator it(mps);\n"
-                  "    bsl::string               key(d_allocator_p);",
-                  1,
-              )
-          elif label in ("exact1024", "heapreserve"):
-              allocator = "&localAllocator" if label == "exact1024" else "d_allocator_p"
-              prefix = (
-                  "    bdlma::LocalSequentialAllocator<1024> localAllocator(d_allocator_p);\n"
-                  if label == "exact1024" else ""
-              )
-              old = (
-                  "    bdlma::LocalSequentialAllocator<1024> localAllocator(d_allocator_p);\n"
-                  "    MessagePropertiesIterator             it(mps);\n"
-                  "    bsl::string                           key(&localAllocator);"
-              )
-              new = (
-                  prefix
-                  + "    MessagePropertiesIterator sizingIt(mps);\n"
-                  + "    bsl::size_t keyLength = 0;\n"
-                  + "    while (sizingIt.hasNext()) {\n"
-                  + "        keyLength += 1 + sizingIt.name().size();\n"
-                  + "    }\n"
-                  + "    MessagePropertiesIterator it(mps);\n"
-                  + f"    bsl::string key({allocator});\n"
-                  + "    key.reserve(keyLength);"
-              )
-              s = s.replace(old, new, 1)
-          else:
-              raise SystemExit(f"unknown variant: {label}")
-          
-          p.write_text(s)
-          PY
+          ref_for() {
+            case "$1" in
+              base) echo "$BASE_REF" ;;
+              a) echo "$A_REF" ;;
+              b) echo "$B_REF" ;;
+              *) return 2 ;;
+            esac
           }
 
-          build_variant() {
+          apply_config() {
+            local label="$1"
+            local buffer="$2"
+            local ref
+            ref="$(ref_for "$label")"
+
+            git checkout "$ref" -- "$source_path"
+            python3 - "$source_path" "$buffer" <<'PY'
+import pathlib, re, sys
+p = pathlib.Path(sys.argv[1])
+size = sys.argv[2]
+s = p.read_text()
+s2, n = re.subn(r'LocalSequentialAllocator<1024>', f'LocalSequentialAllocator<{size}>', s, count=1)
+if n != 1:
+    raise SystemExit(f"expected one LocalSequentialAllocator<1024>, found {n}")
+p.write_text(s2)
+PY
+
             if [[ ! -d thirdparty/bde ]]; then
               bin/build-ubuntu.sh
             else
@@ -135,54 +136,53 @@ jobs:
             fi
           }
 
-          run_bench() {
-            if command -v taskset >/dev/null 2>&1; then
-              taskset -c 0 "$@"
-            else
-              "$@"
-            fi
-          }
-
-          measure_variant() {
+          measure_config() {
             local label="$1"
-            echo "===== $label ====="
-            git diff -- "$source_path" > "perf-results/${label}-source.diff"
+            local buffer="$2"
+            local stem="${label}-buf${buffer}"
 
-            run_bench ./build/blazingmq/tests/bmqp_schemagenerator.t -1 \
-              --benchmark_min_time=0.08s \
-              --benchmark_repetitions=1 >/dev/null
-
-            run_bench ./build/blazingmq/tests/bmqp_schemagenerator.t -1 \
+            taskset -c 0 ./build/blazingmq/tests/bmqp_schemagenerator.t -1 \
               --benchmark_min_time=0.15s \
               --benchmark_repetitions=5 \
               --benchmark_report_aggregates_only=true \
-              --benchmark_out="perf-results/${label}-generator.json" \
-              --benchmark_out_format=json
+              --benchmark_out="perf-results/${stem}.json" \
+              --benchmark_out_format=json >/dev/null
 
-            run_bench ./build/blazingmq/tests/bmqp_schemagenerator.t 2 \
-              | tee "perf-results/${label}-alloc.txt"
+            taskset -c 0 ./build/blazingmq/tests/bmqp_schemagenerator.t 2 \
+              | tee "perf-results/${stem}-alloc.txt"
 
-            run_bench ./build/blazingmq/tests/bmqp_schemagenerator.t 1
+            taskset -c 0 ./build/blazingmq/tests/bmqp_schemagenerator.t 1 >/dev/null
           }
 
-          IFS='-' read -ra labels <<< "${{ matrix.order }}"
-          for label in "${labels[@]}"; do
-            write_variant "$label"
-            build_variant
-            measure_variant "$label"
+          if [[ "${{ matrix.order }}" == "forward" ]]; then
+            sizes=(512 1024 2048 4096)
+            variants=(base a b)
+          else
+            sizes=(4096 2048 1024 512)
+            variants=(b a base)
+          fi
+
+          for buffer in "${sizes[@]}"; do
+            for label in "${variants[@]}"; do
+              echo "===== condition=${{ matrix.condition }} order=${{ matrix.order }} variant=$label buffer=$buffer ====="
+              apply_config "$label" "$buffer"
+              measure_config "$label" "$buffer"
+            done
           done
 
-      - name: Save identities
+      - name: Save source identities
         run: |
           {
+            echo "BASE_REF=$BASE_REF"
             echo "A_REF=$A_REF"
+            echo "B_REF=$B_REF"
             echo "HARNESS_SHA=$GITHUB_SHA"
+            echo "CONDITION=${{ matrix.condition }}"
             echo "ORDER=${{ matrix.order }}"
-            echo "CPU_PIN=0"
           } > perf-results/refs.txt
 
       - uses: actions/upload-artifact@v4
         with:
-          name: schema-threshold-${{ matrix.order }}
+          name: schema-threshold-${{ matrix.condition }}-${{ matrix.order }}
           path: perf-results
           retention-days: 7
