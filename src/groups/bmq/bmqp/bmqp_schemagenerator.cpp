@@ -20,6 +20,8 @@
 
 // BDE
 #include <bdlma_localsequentialallocator.h>
+#include <bsl_cstdlib.h>
+#include <bsl_cstring.h>
 #include <bsl_utility.h>
 
 namespace BloombergLP {
@@ -82,14 +84,46 @@ SchemaGenerator::getSchemaId(const MessageProperties* mps)
         return MessagePropertiesInfo();  // RETURN
     }
 
-    bdlma::LocalSequentialAllocator<1024> localAllocator(d_allocator_p);
-    MessagePropertiesIterator             it(mps);
-    bsl::string                           key(&localAllocator);
+    char        localBuffer[1024];
+    char       *buffer        = localBuffer;
+    char       *dynamicBuffer = 0;
+    bsl::size_t size          = 0;
+    bsl::size_t capacity      = sizeof localBuffer;
 
+    MessagePropertiesIterator it(mps);
     while (it.hasNext()) {
-        key += '_';
-        key += it.name();
+        const bsl::string& name     = it.name();
+        const bsl::size_t  required = size + 1 + name.size();
+
+        if (required > capacity) {
+            bsl::size_t newCapacity = capacity;
+            while (newCapacity < required) {
+                newCapacity *= 2;
+            }
+
+            if (dynamicBuffer) {
+                dynamicBuffer = static_cast<char *>(
+                    bsl::realloc(dynamicBuffer, newCapacity));
+            }
+            else {
+                dynamicBuffer = static_cast<char *>(bsl::malloc(newCapacity));
+                bsl::memcpy(dynamicBuffer, localBuffer, size);
+            }
+
+            BSLS_ASSERT_OPT(dynamicBuffer);
+            buffer   = dynamicBuffer;
+            capacity = newCapacity;
+        }
+
+        buffer[size++] = '_';
+        bsl::memcpy(buffer + size, name.data(), name.size());
+        size += name.size();
     }
+
+    bdlma::LocalSequentialAllocator<1024> localAllocator(d_allocator_p);
+    bsl::string key(buffer, size, &localAllocator);
+
+    bsl::free(dynamicBuffer);
 
     typedef bsl::pair<ContextMap::iterator, bool> InsertOrLookup;
 
