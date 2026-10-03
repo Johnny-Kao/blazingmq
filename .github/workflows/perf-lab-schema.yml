@@ -1,4 +1,4 @@
-name: Schema PR2 Architecture Screen
+name: Schema PR2 Builder Screen
 
 on:
   push:
@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: schema-pr2-architecture-screen
+  group: schema-pr2-builder-screen
   cancel-in-progress: true
 
 jobs:
@@ -31,9 +31,9 @@ jobs:
     timeout-minutes: 180
     env:
       L1_REF: a8cf6ece379cc7e2099ae43ad7c42712a2e15d5b
-      V1_REF: cc05afb246ea641c081f211ef0777bec3f8b0b0e
       P2A_REF: bf59be3b3daaa939dfc86e3cb93697312e769c42
-      P2B_REF: c262815e138121c87433c18386598ff32719f3f3
+      P2C_REF: acd4ad66a2ce5508ba99a1b354f8885ffe20443c
+      P2D_REF: 7891434590dbb7923263a51c615cfd85c07f27a8
 
     steps:
       - uses: actions/checkout@v4
@@ -51,7 +51,6 @@ jobs:
             lscpu
             free -h
             systemd-detect-virt || true
-            echo "cpu0_siblings=$(cat /sys/devices/system/cpu/cpu0/topology/thread_siblings_list 2>/dev/null || true)"
           } | tee perf-results/environment.txt
 
       - name: Install build prerequisites
@@ -70,12 +69,11 @@ jobs:
           siblings="$(cat /sys/devices/system/cpu/cpu0/topology/thread_siblings_list 2>/dev/null || true)"
           sibling="$(echo "$siblings" | tr ',' '\n' | grep -v '^0$' | head -n1 || true)"
           if [[ -z "$sibling" ]]; then sibling=1; fi
-          echo "$sibling" > perf-results/stress-cpu.txt
-          nohup taskset -c "$sibling" sh -c 'while :; do :; done' > perf-results/sibling-stress.log 2>&1 &
+          nohup taskset -c "$sibling" sh -c 'while :; do :; done' >/dev/null 2>&1 &
           echo $! > perf-results/sibling-stress.pid
           sleep 1
 
-      - name: Build and measure PR2 candidates
+      - name: Build and measure builders
         shell: bash
         run: |
           set -euo pipefail
@@ -85,18 +83,16 @@ jobs:
           ref_for() {
             case "$1" in
               l1)  echo "$L1_REF" ;;
-              v1)  echo "$V1_REF" ;;
               p2a) echo "$P2A_REF" ;;
-              p2b) echo "$P2B_REF" ;;
+              p2c) echo "$P2C_REF" ;;
+              p2d) echo "$P2D_REF" ;;
               *) return 2 ;;
             esac
           }
 
           build_and_measure() {
             local label="$1"
-            local ref
-            ref="$(ref_for "$label")"
-
+            local ref="$(ref_for "$label")"
             git checkout "$ref" -- "$cpp" "$hdr"
 
             if [[ ! -d thirdparty/bde ]]; then
@@ -124,11 +120,10 @@ jobs:
               > "perf-results/${label}-alloc.txt"
           }
 
-          forward=(l1 v1 p2a p2b)
           if [[ "${{ matrix.order }}" == "forward" ]]; then
-            configs=("${forward[@]}")
+            configs=(l1 p2a p2c p2d)
           else
-            configs=(p2b p2a v1 l1)
+            configs=(p2d p2c p2a l1)
           fi
 
           for label in "${configs[@]}"; do
@@ -136,20 +131,8 @@ jobs:
             build_and_measure "$label"
           done
 
-      - name: Save identities
-        run: |
-          {
-            echo "L1_REF=$L1_REF"
-            echo "V1_REF=$V1_REF"
-            echo "P2A_REF=$P2A_REF"
-            echo "P2B_REF=$P2B_REF"
-            echo "HARNESS_SHA=$GITHUB_SHA"
-            echo "CONDITION=${{ matrix.condition }}"
-            echo "ORDER=${{ matrix.order }}"
-          } > perf-results/refs.txt
-
       - uses: actions/upload-artifact@v4
         with:
-          name: schema-pr2-screen-${{ matrix.condition }}-${{ matrix.order }}
+          name: schema-pr2-builder-${{ matrix.condition }}-${{ matrix.order }}
           path: perf-results
           retention-days: 7
