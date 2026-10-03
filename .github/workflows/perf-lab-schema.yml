@@ -1,4 +1,4 @@
-name: Schema L1 Final Signoff
+name: Schema L1 Nine-Runner Confirmation
 
 on:
   push:
@@ -10,46 +10,88 @@ permissions:
   contents: read
 
 concurrency:
-  group: schema-l1-final-signoff
+  group: schema-l1-nine-runner-confirmation
   cancel-in-progress: true
 
 jobs:
-  linux-x86-signoff:
+  confirm:
     strategy:
       fail-fast: false
+      max-parallel: 9
       matrix:
         include:
-          - condition: idle
+          - round: 1
+            slot: A
             order: base-l1
-          - condition: idle
+          - round: 1
+            slot: B
             order: l1-base
-          - condition: sibling-busy
+          - round: 1
+            slot: C
+            order: abab
+          - round: 2
+            slot: A
+            order: l1-base
+          - round: 2
+            slot: B
+            order: abab
+          - round: 2
+            slot: C
             order: base-l1
-          - condition: sibling-busy
+          - round: 3
+            slot: A
+            order: abab
+          - round: 3
+            slot: B
+            order: base-l1
+          - round: 3
+            slot: C
             order: l1-base
+
     runs-on: ubuntu-latest
-    timeout-minutes: 150
+    timeout-minutes: 180
     env:
       BASE_REF: 88bbf562b190c04ca4f33edaa9b6dcccb25a08a6
       L1_REF: a8cf6ece379cc7e2099ae43ad7c42712a2e15d5b
+
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Record runner environment
+      - name: Record independent runner identity
+        shell: bash
         run: |
+          set -euo pipefail
           mkdir -p perf-results
           {
-            echo "condition=${{ matrix.condition }}"
+            echo "round=${{ matrix.round }}"
+            echo "slot=${{ matrix.slot }}"
             echo "order=${{ matrix.order }}"
+            echo "runner_name=$RUNNER_NAME"
+            echo "runner_os=$RUNNER_OS"
+            echo "runner_arch=$RUNNER_ARCH"
+            echo "image_os=${ImageOS:-unknown}"
+            echo "image_version=${ImageVersion:-unknown}"
             echo "timestamp=$(date -u +%FT%TZ)"
+            echo
             uname -a
+            echo
             lscpu
+            echo
             free -h
-            uptime
-            systemd-detect-virt || true
+            echo
+            grep -m1 'model name' /proc/cpuinfo || true
+            grep -m1 'vendor_id' /proc/cpuinfo || true
+            grep -m1 'cpu family' /proc/cpuinfo || true
+            grep -m1 '^model[[:space:]]' /proc/cpuinfo || true
+            grep -m1 'stepping' /proc/cpuinfo || true
             echo "cpu0_siblings=$(cat /sys/devices/system/cpu/cpu0/topology/thread_siblings_list 2>/dev/null || true)"
+            echo "cpu0_core=$(cat /sys/devices/system/cpu/cpu0/topology/core_id 2>/dev/null || true)"
+            echo "cpu0_package=$(cat /sys/devices/system/cpu/cpu0/topology/physical_package_id 2>/dev/null || true)"
+            echo
+            systemd-detect-virt || true
+            uptime
           } | tee perf-results/environment.txt
 
       - name: Install build prerequisites
@@ -60,29 +102,17 @@ jobs:
             bison libfl-dev libbenchmark-dev libgmock-dev libgtest-dev libtool \
             libz-dev libssl-dev util-linux time
 
-      - name: Start SMT sibling pressure when requested
-        if: matrix.condition == 'sibling-busy'
-        shell: bash
-        run: |
-          set -euo pipefail
-          siblings="$(cat /sys/devices/system/cpu/cpu0/topology/thread_siblings_list 2>/dev/null || true)"
-          sibling="$(echo "$siblings" | tr ',' '\n' | grep -v '^0$' | head -n1 || true)"
-          if [[ -z "$sibling" ]]; then sibling=1; fi
-          echo "$sibling" > perf-results/stress-cpu.txt
-          nohup taskset -c "$sibling" sh -c 'while :; do :; done' > perf-results/sibling-stress.log 2>&1 &
-          echo $! > perf-results/sibling-stress.pid
-          sleep 1
-
-      - name: Build and compare latest upstream vs clean L1
+      - name: Run paired confirmation sequence
         shell: bash
         run: |
           set -euo pipefail
           cpp="src/groups/bmq/bmqp/bmqp_schemagenerator.cpp"
           hdr="src/groups/bmq/bmqp/bmqp_schemagenerator.h"
 
-          build_variant() {
+          build_and_measure() {
             local label="$1"
             local ref="$2"
+
             git checkout "$ref" -- "$cpp" "$hdr"
 
             if [[ ! -d thirdparty/bde ]]; then
@@ -93,7 +123,8 @@ jobs:
                 cmake --build --preset ubuntu-x64 --target bmqp_schemagenerator.t
             fi
 
-            ./build/blazingmq/tests/bmqp_schemagenerator.t 1 > "perf-results/${label}-correctness.txt"
+            ./build/blazingmq/tests/bmqp_schemagenerator.t 1 \
+              > "perf-results/${label}-correctness.txt"
 
             taskset -c 0 ./build/blazingmq/tests/bmqp_schemagenerator.t -1 \
               --benchmark_min_time=0.20s \
@@ -110,13 +141,26 @@ jobs:
               > "perf-results/${label}-alloc.txt"
           }
 
-          if [[ "${{ matrix.order }}" == "base-l1" ]]; then
-            build_variant base "$BASE_REF"
-            build_variant l1 "$L1_REF"
-          else
-            build_variant l1 "$L1_REF"
-            build_variant base "$BASE_REF"
-          fi
+          case "${{ matrix.order }}" in
+            base-l1)
+              build_and_measure base1 "$BASE_REF"
+              build_and_measure l1_1 "$L1_REF"
+              ;;
+            l1-base)
+              build_and_measure l1_1 "$L1_REF"
+              build_and_measure base1 "$BASE_REF"
+              ;;
+            abab)
+              build_and_measure base1 "$BASE_REF"
+              build_and_measure l1_1 "$L1_REF"
+              build_and_measure base2 "$BASE_REF"
+              build_and_measure l1_2 "$L1_REF"
+              ;;
+            *)
+              echo "unknown order" >&2
+              exit 2
+              ;;
+          esac
 
       - name: Save identities
         run: |
@@ -124,12 +168,13 @@ jobs:
             echo "BASE_REF=$BASE_REF"
             echo "L1_REF=$L1_REF"
             echo "HARNESS_SHA=$GITHUB_SHA"
-            echo "CONDITION=${{ matrix.condition }}"
+            echo "ROUND=${{ matrix.round }}"
+            echo "SLOT=${{ matrix.slot }}"
             echo "ORDER=${{ matrix.order }}"
           } > perf-results/refs.txt
 
       - uses: actions/upload-artifact@v4
         with:
-          name: schema-l1-signoff-${{ matrix.condition }}-${{ matrix.order }}
+          name: schema-confirm-r${{ matrix.round }}-${{ matrix.slot }}-${{ matrix.order }}
           path: perf-results
           retention-days: 7
