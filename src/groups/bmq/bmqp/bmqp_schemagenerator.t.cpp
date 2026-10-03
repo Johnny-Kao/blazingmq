@@ -30,6 +30,7 @@
 
 #include <bsl_cstdlib.h>
 #include <bsl_map.h>
+#include <bsl_vector.h>
 
 // CONVENIENCE
 using namespace BloombergLP;
@@ -187,6 +188,109 @@ static void test1_breathingTest()
     }
 }
 
+
+static void populatePhaseProperties(bmqp::MessageProperties* mps,
+                                    int                      numProperties,
+                                    int                      nameLength,
+                                    int                      seed)
+{
+    for (int i = 0; i < numProperties; ++i) {
+        bsl::string name("p", bmqtst::TestHelperUtil::allocator());
+        name += bsl::to_string(seed);
+        name += "_";
+        name += bsl::to_string(i);
+        if (static_cast<int>(name.length()) < nameLength) {
+            name.append(nameLength - name.length(), 'x');
+        }
+        BMQTST_ASSERT_EQ(0, mps->setPropertyAsString(name, "v"));
+    }
+}
+
+static void printPhaseStats(const char*                       schemaName,
+                            const char*                       mode,
+                            const bmqp::SchemaGenerator::PhaseStats& stats)
+{
+    const double calls = static_cast<double>(stats.d_calls == 0 ? 1
+                                                                : stats.d_calls);
+
+    cout << "PHASE"
+         << " schema=" << schemaName
+         << " mode=" << mode
+         << " calls=" << stats.d_calls
+         << " misses=" << stats.d_misses
+         << " hash_ns_per_call=" << stats.d_hashNs / calls
+         << " lookup_ns_per_call=" << stats.d_lookupNs / calls
+         << " compare_ns_per_call=" << stats.d_compareNs / calls
+         << " lock_wait_ns_per_call=" << stats.d_lockWaitNs / calls
+         << " lock_held_ns_per_call=" << stats.d_lockHeldNs / calls
+         << " materialize_ns_per_call=" << stats.d_materializeNs / calls
+         << endl;
+}
+
+static void test4_phaseAttribution()
+{
+    bmqtst::TestHelperUtil::ignoreCheckDefAlloc() = true;
+
+    struct SchemaShape {
+        const char* d_name;
+        int         d_properties;
+        int         d_nameLength;
+    };
+
+    const SchemaShape shapes[] = {
+        {"small", 4, 32},
+        {"medium", 16, 64},
+        {"large", 64, 128}};
+
+    for (int s = 0; s < 3; ++s) {
+        {
+            bmqp::SchemaGenerator generator(bmqtst::TestHelperUtil::allocator());
+            bmqp::MessageProperties hot(bmqtst::TestHelperUtil::allocator());
+            populatePhaseProperties(&hot,
+                                    shapes[s].d_properties,
+                                    shapes[s].d_nameLength,
+                                    1);
+
+            generator.getSchemaId(&hot);
+            generator._resetPhaseStats();
+
+            for (int i = 0; i < 5000; ++i) {
+                generator.getSchemaId(&hot);
+            }
+
+            printPhaseStats(shapes[s].d_name,
+                            "hit",
+                            generator._phaseStats());
+        }
+
+        {
+            bmqp::SchemaGenerator generator(bmqtst::TestHelperUtil::allocator());
+            generator._setCapacity(16);
+
+            bsl::vector<bmqp::MessageProperties> misses(
+                bmqtst::TestHelperUtil::allocator());
+            misses.reserve(32);
+            for (int m = 0; m < 32; ++m) {
+                misses.emplace_back();
+                populatePhaseProperties(&misses.back(),
+                                        shapes[s].d_properties,
+                                        shapes[s].d_nameLength,
+                                        1000 + m);
+            }
+
+            generator._resetPhaseStats();
+
+            for (int i = 0; i < 2000; ++i) {
+                generator.getSchemaId(&misses[i % misses.size()]);
+            }
+
+            printPhaseStats(shapes[s].d_name,
+                            "miss",
+                            generator._phaseStats());
+        }
+    }
+}
+
 #ifdef BMQTST_BENCHMARK_ENABLED
 static void testN1_getSchemaIdHot_GoogleBenchmark(benchmark::State& state)
 {
@@ -227,6 +331,7 @@ int main(int argc, char* argv[])
 
     switch (_testCase) {
     case 0:
+    case 4: test4_phaseAttribution(); break;
     case 1: test1_breathingTest(); break;
     case -1:
         BMQTST_BENCHMARK_WITH_ARGS(testN1_getSchemaIdHot,

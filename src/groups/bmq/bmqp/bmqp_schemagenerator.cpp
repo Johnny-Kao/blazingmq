@@ -22,6 +22,7 @@
 #include <bdlma_localsequentialallocator.h>
 #include <bslh_defaulthashalgorithm.h>
 #include <bsl_utility.h>
+#include <bsls_timeutil.h>
 
 namespace BloombergLP {
 namespace bmqp {
@@ -111,6 +112,7 @@ SchemaGenerator::SchemaGenerator(bslma::Allocator* basicAllocator)
 , d_fingerprintMap(d_allocator_p)
 , d_lru(d_allocator_p)
 , d_lock(bsls::SpinLock::s_unlocked)
+, d_phaseStats()
 {
     // NOTHING
 }
@@ -131,17 +133,29 @@ SchemaGenerator::getSchemaId(const MessageProperties* mps)
         return MessagePropertiesInfo();  // RETURN
     }
 
+    ++d_phaseStats.d_calls;
+
+    bsls::Types::Int64 phaseStart = bsls::TimeUtil::getTimer();
     const bsl::size_t schemaFingerprint = fingerprint(mps);
+    d_phaseStats.d_hashNs += bsls::TimeUtil::getTimer() - phaseStart;
 
     {
+        const bsls::Types::Int64 waitStart = bsls::TimeUtil::getTimer();
         bsls::SpinLockGuard guard(&d_lock);  // LOCK
+        const bsls::Types::Int64 lockStart = bsls::TimeUtil::getTimer();
+        d_phaseStats.d_lockWaitNs += lockStart - waitStart;
 
+        phaseStart = bsls::TimeUtil::getTimer();
         bsl::pair<FingerprintMap::iterator, FingerprintMap::iterator> range =
             d_fingerprintMap.equal_range(schemaFingerprint);
+        d_phaseStats.d_lookupNs += bsls::TimeUtil::getTimer() - phaseStart;
 
         for (FingerprintMap::iterator fit = range.first; fit != range.second;
              ++fit) {
-            if (!matchesKey(*fit->second, mps)) {
+            phaseStart = bsls::TimeUtil::getTimer();
+            const bool matches = matchesKey(*fit->second, mps);
+            d_phaseStats.d_compareNs += bsls::TimeUtil::getTimer() - phaseStart;
+            if (!matches) {
                 continue;
             }
 
@@ -159,10 +173,16 @@ SchemaGenerator::getSchemaId(const MessageProperties* mps)
             }
 
             context.d_listIterator = current;
+            d_phaseStats.d_lockHeldNs +=
+                bsls::TimeUtil::getTimer() - lockStart;
             return MessagePropertiesInfo(true, context.d_id, false);  // RETURN
         }
+
+        d_phaseStats.d_lockHeldNs += bsls::TimeUtil::getTimer() - lockStart;
     }
 
+    ++d_phaseStats.d_misses;
+    phaseStart = bsls::TimeUtil::getTimer();
     bsl::size_t keyLength = 0;
     MessagePropertiesIterator sizeIt(mps);
     while (sizeIt.hasNext()) {
@@ -178,10 +198,14 @@ SchemaGenerator::getSchemaId(const MessageProperties* mps)
         key += '_';
         key += it.name();
     }
+    d_phaseStats.d_materializeNs += bsls::TimeUtil::getTimer() - phaseStart;
 
     typedef bsl::pair<ContextMap::iterator, bool> InsertOrLookup;
 
+    const bsls::Types::Int64 waitStart = bsls::TimeUtil::getTimer();
     bsls::SpinLockGuard guard(&d_lock);  // LOCK
+    const bsls::Types::Int64 lockStart = bsls::TimeUtil::getTimer();
+    d_phaseStats.d_lockWaitNs += lockStart - waitStart;
 
     InsertOrLookup insertOrLookup = d_contextMap.emplace(key, d_lru.end());
     const Context& context        = insertOrLookup.first->second;
@@ -248,6 +272,7 @@ SchemaGenerator::getSchemaId(const MessageProperties* mps)
 
     // Update 'Context' with the LRU tracking
     insertOrLookup.first->second.d_listIterator = current;
+    d_phaseStats.d_lockHeldNs += bsls::TimeUtil::getTimer() - lockStart;
 
     return MessagePropertiesInfo(true, result, isNew);
 }

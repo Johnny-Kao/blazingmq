@@ -82,6 +82,17 @@ class SchemaGenerator {
     // PUBLIC TYPES
     typedef MessagePropertiesInfo::SchemaIdType SchemaIdType;
 
+    struct PhaseStats {
+        bsls::Types::Int64 d_hashNs;
+        bsls::Types::Int64 d_lookupNs;
+        bsls::Types::Int64 d_compareNs;
+        bsls::Types::Int64 d_lockWaitNs;
+        bsls::Types::Int64 d_lockHeldNs;
+        bsls::Types::Int64 d_materializeNs;
+        bsls::Types::Int64 d_calls;
+        bsls::Types::Int64 d_misses;
+    };
+
     // CONSTANTS
     static const SchemaIdType k_MAX_SCHEMA =
         MessagePropertiesInfo::k_MAX_SCHEMA;
@@ -128,6 +139,8 @@ class SchemaGenerator {
     mutable bsls::SpinLock d_lock;
     // Spin lock for thread-safe manipulators
 
+    mutable PhaseStats d_phaseStats;
+
   public:
     // TRAITS
     BSLMF_NESTED_TRAIT_DECLARATION(SchemaGenerator, bslma::UsesBslmaAllocator)
@@ -142,6 +155,10 @@ class SchemaGenerator {
 
     /// For testing only.
     void _setCapacity(SchemaIdType maxSchema);
+
+    /// For performance attribution testing only.
+    void _resetPhaseStats();
+    PhaseStats _phaseStats() const;
 };
 
 // ============================================================================
@@ -157,6 +174,16 @@ inline void SchemaGenerator::_setCapacity(SchemaIdType maxSchema)
 {
     BSLS_ASSERT_OPT(maxSchema > d_currentId && "Shrinking is not supported");
     d_capacity = maxSchema;
+}
+
+inline void SchemaGenerator::_resetPhaseStats()
+{
+    d_phaseStats = PhaseStats();
+}
+
+inline SchemaGenerator::PhaseStats SchemaGenerator::_phaseStats() const
+{
+    return d_phaseStats;
 }
 
 }  // close package namespace
