@@ -87,8 +87,19 @@ SchemaGenerator::getSchemaId(const MessageProperties* mps)
     bsl::string                           key(&localAllocator);
 
     while (it.hasNext()) {
+        const bsl::string& name = it.name();
+        const bsl::size_t required = key.size() + 1 + name.size();
+
+        if (required > key.capacity()) {
+            bsl::size_t bucket = 32;
+            while (bucket < required) {
+                bucket *= 2;
+            }
+            key.reserve(bucket);
+        }
+
         key += '_';
-        key += it.name();
+        key += name;
     }
 
     typedef bsl::pair<ContextMap::iterator, bool> InsertOrLookup;
