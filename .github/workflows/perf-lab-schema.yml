@@ -1,4 +1,4 @@
-name: Schema Key Strategy Comparison Lab
+name: Schema Final Convergence Lab
 
 on:
   push:
@@ -10,11 +10,11 @@ permissions:
   contents: read
 
 concurrency:
-  group: schema-key-strategy-comparison
+  group: schema-final-convergence
   cancel-in-progress: true
 
 jobs:
-  linux-x86-comparison:
+  linux-x86-convergence:
     strategy:
       fail-fast: false
       matrix:
@@ -28,12 +28,13 @@ jobs:
           - condition: sibling-busy
             order: reverse
     runs-on: ubuntu-latest
-    timeout-minutes: 150
+    timeout-minutes: 180
     env:
       BASE_REF: 7981dfc38fbde7edcc11ef36843293b64d96ab08
       L1_REF: f9acace32cf3426c920d0bba5c2f25e563ae56ed
       V1_REF: 5b3d456becbb66e293df3fffc25b3f94e86526d8
       V2_REF: e149f00f84e3cff9ccd900fdd291b89fe7eaca75
+      PHASE_REF: dcde8d6dd4b5d8ce2a5158144b8582dd6fec57fb
     steps:
       - uses: actions/checkout@v4
         with:
@@ -54,8 +55,6 @@ jobs:
             echo "cpu0_siblings=$(cat /sys/devices/system/cpu/cpu0/topology/thread_siblings_list 2>/dev/null || true)"
             echo "cpu0_core=$(cat /sys/devices/system/cpu/cpu0/topology/core_id 2>/dev/null || true)"
             echo "cpu0_package=$(cat /sys/devices/system/cpu/cpu0/topology/physical_package_id 2>/dev/null || true)"
-            cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || true
-            cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq 2>/dev/null || true
           } | tee perf-results/environment.txt
 
       - name: Install build prerequisites
@@ -64,7 +63,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             autoconf automake build-essential gdb cmake ninja-build pkg-config \
             bison libfl-dev libbenchmark-dev libgmock-dev libgtest-dev libtool \
-            libz-dev libssl-dev util-linux
+            libz-dev libssl-dev util-linux time
 
       - name: Start SMT sibling pressure when requested
         if: matrix.condition == 'sibling-busy'
@@ -82,7 +81,7 @@ jobs:
           echo $! > perf-results/sibling-stress.pid
           sleep 1
 
-      - name: Build and measure all schema-key strategies
+      - name: Build and measure final strategy matrix
         shell: bash
         run: |
           set -euo pipefail
@@ -100,16 +99,15 @@ jobs:
             esac
           }
 
-          apply_variant() {
+          build_variant() {
             local label="$1"
-            local buffer="$2"
             local ref
             ref="$(ref_for "$label")"
 
             git checkout "$ref" -- "$cpp" "$hdr"
 
             if [[ "$label" == "v1" ]]; then
-              python3 -c 'import pathlib,re,sys; p=pathlib.Path(sys.argv[1]); s=p.read_text(); s2,n=re.subn(r"LocalSequentialAllocator<1024>", "LocalSequentialAllocator<"+sys.argv[2]+">", s, count=1); n == 1 or (_ for _ in ()).throw(RuntimeError("expected one LocalSequentialAllocator<1024>, found %d" % n)); p.write_text(s2)' "$cpp" "$buffer"
+              python3 -c 'import pathlib,re; p=pathlib.Path("'"$cpp"'"); s=p.read_text(); s2,n=re.subn(r"LocalSequentialAllocator<1024>", "LocalSequentialAllocator<4096>", s, count=1); n == 1 or (_ for _ in ()).throw(RuntimeError("expected one local allocator")); p.write_text(s2)'
             fi
 
             if [[ ! -d thirdparty/bde ]]; then
@@ -128,32 +126,18 @@ jobs:
 
           measure_variant() {
             local label="$1"
-            local buffer="$2"
-            local stem="${label}-buf${buffer}"
 
-            taskset -c 0 ./build/blazingmq/tests/bmqp_schemagenerator.t -1 \
-              --benchmark_min_time=0.15s \
-              --benchmark_repetitions=5 \
-              --benchmark_report_aggregates_only=true \
-              --benchmark_out="perf-results/${stem}.json" \
-              --benchmark_out_format=json >/dev/null
+            ./build/blazingmq/tests/bmqp_schemagenerator.t 1 >/dev/null
+
+            /usr/bin/time -v ./build/blazingmq/tests/bmqp_schemagenerator.t 3 \
+              > "perf-results/${label}-convergence.txt" \
+              2> "perf-results/${label}-process-time.txt"
 
             taskset -c 0 ./build/blazingmq/tests/bmqp_schemagenerator.t 2 \
-              | tee "perf-results/${stem}-alloc.txt"
-
-            taskset -c 0 ./build/blazingmq/tests/bmqp_schemagenerator.t 1 >/dev/null
+              > "perf-results/${label}-alloc.txt"
           }
 
-          forward=(
-            "base:1024"
-            "l1:1024"
-            "v1:512"
-            "v1:1024"
-            "v1:2048"
-            "v1:4096"
-            "v1:8192"
-            "v2:1024"
-          )
+          forward=(base l1 v1 v2)
 
           if [[ "${{ matrix.order }}" == "forward" ]]; then
             configs=("${forward[@]}")
@@ -164,13 +148,33 @@ jobs:
             done
           fi
 
-          for config in "${configs[@]}"; do
-            label="${config%%:*}"
-            buffer="${config##*:}"
-            echo "===== condition=${{ matrix.condition }} order=${{ matrix.order }} variant=$label buffer=$buffer ====="
-            apply_variant "$label" "$buffer"
-            measure_variant "$label" "$buffer"
+          for label in "${configs[@]}"; do
+            echo "===== condition=${{ matrix.condition }} order=${{ matrix.order }} variant=$label ====="
+            build_variant "$label"
+            measure_variant "$label"
           done
+
+      - name: Run V2 phase attribution
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git checkout "$PHASE_REF" -- \
+            src/groups/bmq/bmqp/bmqp_schemagenerator.cpp \
+            src/groups/bmq/bmqp/bmqp_schemagenerator.h \
+            src/groups/bmq/bmqp/bmqp_schemagenerator.t.cpp
+
+          DIR_THIRDPARTY="$PWD/thirdparty" \
+          DIR_BUILD="$PWD/build" \
+          DIR_INSTALL="$PWD" \
+            cmake --preset ubuntu-x64
+          DIR_THIRDPARTY="$PWD/thirdparty" \
+          DIR_BUILD="$PWD/build" \
+          DIR_INSTALL="$PWD" \
+            cmake --build --preset ubuntu-x64 --target bmqp_schemagenerator.t
+
+          taskset -c 0 ./build/blazingmq/tests/bmqp_schemagenerator.t 4 \
+            > perf-results/v2-phase-attribution.txt
 
       - name: Save source identities
         run: |
@@ -178,7 +182,9 @@ jobs:
             echo "BASE_REF=$BASE_REF"
             echo "L1_REF=$L1_REF"
             echo "V1_REF=$V1_REF"
+            echo "V1_LOCAL_BUFFER=4096"
             echo "V2_REF=$V2_REF"
+            echo "PHASE_REF=$PHASE_REF"
             echo "HARNESS_SHA=$GITHUB_SHA"
             echo "CONDITION=${{ matrix.condition }}"
             echo "ORDER=${{ matrix.order }}"
@@ -186,6 +192,6 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: schema-key-${{ matrix.condition }}-${{ matrix.order }}
+          name: schema-final-${{ matrix.condition }}-${{ matrix.order }}
           path: perf-results
           retention-days: 7
