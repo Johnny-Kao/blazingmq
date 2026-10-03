@@ -117,9 +117,18 @@ static void test2_allocatorProfile()
             bmqp::SchemaGenerator generator(&allocator);
             generator.getSchemaId(&mps);
 
+            bslma::TestAllocator& defaultAllocator =
+                bmqtst::TestHelperUtil::defaultAllocator();
+
             const bsls::Types::Int64 blocksBefore = allocator.numBlocksTotal();
             const bsls::Types::Int64 bytesBefore  = allocator.numBytesTotal();
             const bsls::Types::Int64 inUseBefore  = allocator.numBytesInUse();
+            const bsls::Types::Int64 defaultBlocksBefore =
+                defaultAllocator.numBlocksTotal();
+            const bsls::Types::Int64 defaultBytesBefore =
+                defaultAllocator.numBytesTotal();
+            const bsls::Types::Int64 defaultInUseBefore =
+                defaultAllocator.numBytesInUse();
 
             const int iterations = 100;
             for (int i = 0; i < iterations; ++i) {
@@ -131,6 +140,12 @@ static void test2_allocatorProfile()
                  << " blocks=" << allocator.numBlocksTotal() - blocksBefore
                  << " bytes=" << allocator.numBytesTotal() - bytesBefore
                  << " retained=" << allocator.numBytesInUse() - inUseBefore
+                 << " default_blocks="
+                 << defaultAllocator.numBlocksTotal() - defaultBlocksBefore
+                 << " default_bytes="
+                 << defaultAllocator.numBytesTotal() - defaultBytesBefore
+                 << " default_retained="
+                 << defaultAllocator.numBytesInUse() - defaultInUseBefore
                  << endl;
         }
     }
