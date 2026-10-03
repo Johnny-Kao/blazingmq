@@ -18,8 +18,15 @@
 
 // BDE
 #include <bdlb_random.h>
+#include <bdlf_bind.h>
+#include <bsl_algorithm.h>
+#include <bslma_newdeleteallocator.h>
 #include <bslma_testallocator.h>
+#include <bslmt_barrier.h>
+#include <bslmt_threadgroup.h>
+#include <bsls_timeutil.h>
 #include <bslstl_map.h>
+#include <bsl_vector.h>
 
 // TEST DRIVER
 #include <bmqtst_testhelper.h>
@@ -251,6 +258,231 @@ static void test1_breathingTest()
     }
 }
 
+
+struct ConvergenceWorkerData {
+    bmqp::SchemaGenerator*               d_generator_p;
+    bslmt::Barrier*                      d_barrier_p;
+    bmqp::MessageProperties              d_hot;
+    bsl::vector<bmqp::MessageProperties> d_misses;
+    bsl::vector<bsls::Types::Int64>      d_latencies;
+    int                                  d_hitRate;
+    int                                  d_iterations;
+    bsls::Types::Int64                   d_start;
+    bsls::Types::Int64                   d_end;
+    bsls::Types::Int64                   d_hits;
+
+    explicit ConvergenceWorkerData(bslma::Allocator* allocator)
+    : d_generator_p(0)
+    , d_barrier_p(0)
+    , d_hot(allocator)
+    , d_misses(allocator)
+    , d_latencies(allocator)
+    , d_hitRate(100)
+    , d_iterations(0)
+    , d_start(0)
+    , d_end(0)
+    , d_hits(0)
+    {
+    }
+};
+
+static void populateConvergenceProperties(bmqp::MessageProperties* mps,
+                                          int                      numProperties,
+                                          int                      nameLength,
+                                          int                      schemaSeed)
+{
+    for (int i = 0; i < numProperties; ++i) {
+        bsl::string name("p", bmqtst::TestHelperUtil::allocator());
+        name += bsl::to_string(schemaSeed);
+        name += "_";
+        name += bsl::to_string(i);
+        if (static_cast<int>(name.length()) < nameLength) {
+            name.append(nameLength - name.length(), 'x');
+        }
+        BMQTST_ASSERT_EQ(0, mps->setPropertyAsString(name, "v"));
+    }
+}
+
+static void convergenceWorker(ConvergenceWorkerData* data)
+{
+    data->d_barrier_p->wait();
+
+    int missIndex = 0;
+    data->d_start = bsls::TimeUtil::getTimer();
+
+    for (int i = 0; i < data->d_iterations; ++i) {
+        const bool useHot =
+            data->d_hitRate != 0 && (i % 100) < data->d_hitRate;
+
+        const bmqp::MessageProperties* mps;
+        if (useHot) {
+            mps = &data->d_hot;
+        }
+        else {
+            mps = &data->d_misses[missIndex % data->d_misses.size()];
+            ++missIndex;
+        }
+
+        const bool sample = (i & 3) == 0;
+        bsls::Types::Int64 begin = 0;
+        if (sample) {
+            begin = bsls::TimeUtil::getTimer();
+        }
+
+        const bmqp::MessagePropertiesInfo info =
+            data->d_generator_p->getSchemaId(mps);
+
+        if (!info.isRecycled()) {
+            ++data->d_hits;
+        }
+
+        if (sample) {
+            data->d_latencies.push_back(bsls::TimeUtil::getTimer() - begin);
+        }
+    }
+
+    data->d_end = bsls::TimeUtil::getTimer();
+}
+
+static void test3_convergenceMatrix()
+{
+    bmqtst::TestHelperUtil::ignoreCheckDefAlloc() = true;
+    bmqtst::TestHelperUtil::ignoreCheckGblAlloc() = true;
+
+    struct SchemaShape {
+        const char* d_name;
+        int         d_properties;
+        int         d_nameLength;
+    };
+
+    const SchemaShape shapes[] = {
+        {"small", 4, 32},
+        {"medium", 16, 64},
+        {"large", 64, 128}};
+
+    const int hitRates[] = {0, 50, 90, 99, 100};
+    const int threads[]  = {1, 2, 4, 8, 16};
+
+    const int k_MISS_RING_SIZE = 32;
+    const int k_ITERATIONS     = 2000;
+
+    for (int s = 0; s < 3; ++s) {
+        for (int h = 0; h < 5; ++h) {
+            for (int t = 0; t < 5; ++t) {
+                bslma::Allocator* allocator =
+                    &bslma::NewDeleteAllocator::singleton();
+
+                bmqp::SchemaGenerator generator(allocator);
+                generator._setCapacity(16);
+
+                const int numThreads = threads[t];
+                bslmt::Barrier barrier(numThreads + 1);
+
+                bsl::vector<ConvergenceWorkerData*> workers(allocator);
+                workers.reserve(numThreads);
+
+                for (int thread = 0; thread < numThreads; ++thread) {
+                    ConvergenceWorkerData* data =
+                        new (*allocator) ConvergenceWorkerData(allocator);
+                    data->d_generator_p = &generator;
+                    data->d_barrier_p   = &barrier;
+                    data->d_hitRate     = hitRates[h];
+                    data->d_iterations  = k_ITERATIONS;
+                    data->d_latencies.reserve(k_ITERATIONS / 4 + 1);
+
+                    populateConvergenceProperties(&data->d_hot,
+                                                  shapes[s].d_properties,
+                                                  shapes[s].d_nameLength,
+                                                  1);
+
+                    data->d_misses.reserve(k_MISS_RING_SIZE);
+                    for (int m = 0; m < k_MISS_RING_SIZE; ++m) {
+                        data->d_misses.emplace_back();
+                        populateConvergenceProperties(
+                            &data->d_misses.back(),
+                            shapes[s].d_properties,
+                            shapes[s].d_nameLength,
+                            1000 + thread * k_MISS_RING_SIZE + m);
+                    }
+
+                    workers.push_back(data);
+                }
+
+                // Keep the intended hot schema resident before timing.
+                generator.getSchemaId(&workers[0]->d_hot);
+
+                bslmt::ThreadGroup threadGroup(allocator);
+                for (int thread = 0; thread < numThreads; ++thread) {
+                    const int rc = threadGroup.addThread(
+                        bdlf::BindUtil::bind(&convergenceWorker,
+                                             workers[thread]));
+                    BMQTST_ASSERT_EQ(0, rc);
+                }
+
+                barrier.wait();
+                threadGroup.joinAll();
+
+                bsls::Types::Int64 firstStart = workers[0]->d_start;
+                bsls::Types::Int64 lastEnd    = workers[0]->d_end;
+                bsls::Types::Int64 hits       = 0;
+                bsl::vector<bsls::Types::Int64> latencies(allocator);
+
+                for (int thread = 0; thread < numThreads; ++thread) {
+                    firstStart = bsl::min(firstStart, workers[thread]->d_start);
+                    lastEnd    = bsl::max(lastEnd, workers[thread]->d_end);
+                    hits += workers[thread]->d_hits;
+                    latencies.insert(latencies.end(),
+                                     workers[thread]->d_latencies.begin(),
+                                     workers[thread]->d_latencies.end());
+                }
+
+                bsl::sort(latencies.begin(), latencies.end());
+
+                const bsls::Types::Int64 totalOps =
+                    static_cast<bsls::Types::Int64>(numThreads) *
+                    k_ITERATIONS;
+                const bsls::Types::Int64 elapsedNs = lastEnd - firstStart;
+                const double throughput =
+                    elapsedNs > 0
+                        ? static_cast<double>(totalOps) * 1000000000.0 /
+                              static_cast<double>(elapsedNs)
+                        : 0.0;
+                const double actualHitRate =
+                    100.0 * static_cast<double>(hits) /
+                    static_cast<double>(totalOps);
+
+                const bsl::size_t p50Index =
+                    latencies.empty() ? 0 : latencies.size() / 2;
+                const bsl::size_t p99Index =
+                    latencies.empty()
+                        ? 0
+                        : bsl::min(latencies.size() - 1,
+                                   (latencies.size() * 99) / 100);
+
+                cout << "CONVERGENCE"
+                     << " schema=" << shapes[s].d_name
+                     << " properties=" << shapes[s].d_properties
+                     << " name_length=" << shapes[s].d_nameLength
+                     << " target_hit_rate=" << hitRates[h]
+                     << " actual_hit_rate=" << actualHitRate
+                     << " threads=" << numThreads
+                     << " ops=" << totalOps
+                     << " throughput_ops_s=" << throughput
+                     << " p50_ns="
+                     << (latencies.empty() ? 0 : latencies[p50Index])
+                     << " p99_ns="
+                     << (latencies.empty() ? 0 : latencies[p99Index])
+                     << endl;
+
+                for (int thread = 0; thread < numThreads; ++thread) {
+                    workers[thread]->~ConvergenceWorkerData();
+                    allocator->deallocate(workers[thread]);
+                }
+            }
+        }
+    }
+}
+
 #ifdef BMQTST_BENCHMARK_ENABLED
 static void testN1_getSchemaIdHot_GoogleBenchmark(benchmark::State& state)
 {
@@ -291,6 +523,7 @@ int main(int argc, char* argv[])
 
     switch (_testCase) {
     case 0:
+    case 3: test3_convergenceMatrix(); break;
     case 2: test2_allocatorProfile(); break;
     case 1: test1_breathingTest(); break;
     case -1:
