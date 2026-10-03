@@ -146,10 +146,10 @@ jobs:
           }
 
           if [[ "${{ matrix.order }}" == "forward" ]]; then
-            sizes=(512 1024 2048 4096)
+            sizes=(512 1024 2048 4096 8192)
             variants=(base a b)
           else
-            sizes=(4096 2048 1024 512)
+            sizes=(8192 4096 2048 1024 512)
             variants=(b a base)
           fi
 
