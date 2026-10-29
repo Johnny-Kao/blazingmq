@@ -1,7 +1,5 @@
 name: Schema Perf Lab
 on:
-  push:
-    branches: [research/blazingmq-overflowmemoutput-eval]
   workflow_dispatch:
 permissions:
   contents: read
