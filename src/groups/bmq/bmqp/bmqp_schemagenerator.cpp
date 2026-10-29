@@ -19,8 +19,6 @@
 #include <bmqscm_version.h>
 
 // BDE
-#include <bdlma_localsequentialallocator.h>
-#include <bdlsb_overflowmemoutput.h>
 #include <bsl_utility.h>
 
 namespace BloombergLP {
@@ -83,27 +81,12 @@ SchemaGenerator::getSchemaId(const MessageProperties* mps)
         return MessagePropertiesInfo();  // RETURN
     }
 
-    char localBuffer[1024];
-    bdlsb::OverflowMemOutput buffer(
-        localBuffer,
-        sizeof localBuffer,
-        d_allocator_p);
-
     MessagePropertiesIterator it(mps);
+    bsl::string             key(d_allocator_p);
+
     while (it.hasNext()) {
-        buffer.sputc('_');
-        buffer.sputn(it.name().data(), it.name().size());
-    }
-
-    const bsl::size_t keyLength = buffer.dataLength();
-
-    bdlma::LocalSequentialAllocator<1024> localAllocator(d_allocator_p);
-    bsl::string key(&localAllocator);
-    key.reserve(keyLength);
-    key.append(buffer.initialBuffer(), buffer.dataLengthInInitialBuffer());
-    if (buffer.dataLengthInOverflowBuffer()) {
-        key.append(buffer.overflowBuffer(),
-                   buffer.dataLengthInOverflowBuffer());
+        key += '_';
+        key += it.name();
     }
 
     typedef bsl::pair<ContextMap::iterator, bool> InsertOrLookup;
