@@ -188,7 +188,8 @@ else
 fi
 
 cmake --preset "${PRESET}"
-cmake --build --preset "${PRESET}"
+# Research CI: compile only the schema-generator test, not the broker.
+cmake --build --preset "${PRESET}" --target bmqp_schemagenerator.t
 
 echo broker is here: "${DIR_BUILD}/blazingmq/src/applications/bmqbrkr/bmqbrkr.tsk"
 echo to run the broker: "${DIR_BUILD}/blazingmq/src/applications/bmqbrkr/run"
