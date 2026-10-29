@@ -1,150 +1,124 @@
-name: Schema Final Staged Validation
-
+name: Schema Perf Lab
 on:
   push:
-    branches:
-      - research/blazingmq-perf-lab
+    branches: [research/blazingmq-overflowmemoutput-eval]
   workflow_dispatch:
-
 permissions:
   contents: read
-
 concurrency:
-  group: schema-final-staged-validation
+  group: schema-bde-buffer-reuse-eval
   cancel-in-progress: true
-
 jobs:
-  validate:
+  compare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 110
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - condition: idle
-            order: forward
-          - condition: idle
-            order: reverse
-          - condition: sibling-busy
-            order: forward
-          - condition: sibling-busy
-            order: reverse
-    runs-on: ubuntu-latest
-    timeout-minutes: 180
+        order: [forward, reverse]
     env:
-      BASE_REF: 88bbf562b190c04ca4f33edaa9b6dcccb25a08a6
-      PR1_REF: 8ae10f663
-      PRS2_REF: 4ab084ae9
-
+      PR1_REF: 8f30d3b7f05a41167e229ee3787fa0b769dcbc4e
+      P2A_REF: 1e90f5758560adda3e0d85bf1dfeaf4d1a7bfc25
+      P2C_REF: acd4ad66a2ce5508ba99a1b354f8885ffe20443c
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      - name: Record runner environment
+      - name: Record runner and install prerequisites
+        shell: bash
         run: |
+          set -euo pipefail
           mkdir -p perf-results
-          {
-            echo "condition=${{ matrix.condition }}"
-            echo "order=${{ matrix.order }}"
-            echo "timestamp=$(date -u +%FT%TZ)"
-            uname -a
-            lscpu
-            free -h
-            systemd-detect-virt || true
-            echo "cpu0_siblings=$(cat /sys/devices/system/cpu/cpu0/topology/thread_siblings_list 2>/dev/null || true)"
-          } | tee perf-results/environment.txt
-
-      - name: Install build prerequisites
-        run: |
+          { date -u; uname -a; lscpu; free -h; systemd-detect-virt || true; } > perf-results/environment.txt
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             autoconf automake build-essential gdb cmake ninja-build pkg-config \
             bison libfl-dev libbenchmark-dev libgmock-dev libgtest-dev libtool \
-            libz-dev libssl-dev util-linux time
-
-      - name: Start SMT sibling pressure when requested
-        if: matrix.condition == 'sibling-busy'
+            libz-dev libssl-dev util-linux time valgrind
+      - name: Build and validate all variants
         shell: bash
         run: |
           set -euo pipefail
-          siblings="$(cat /sys/devices/system/cpu/cpu0/topology/thread_siblings_list 2>/dev/null || true)"
-          sibling="$(echo "$siblings" | tr ',' '\n' | grep -v '^0$' | head -n1 || true)"
-          if [[ -z "$sibling" ]]; then sibling=1; fi
-          echo "$sibling" > perf-results/stress-cpu.txt
-          nohup taskset -c "$sibling" sh -c 'while :; do :; done' >/dev/null 2>&1 &
-          echo $! > perf-results/sibling-stress.pid
-          sleep 1
-
-      - name: Build and measure staged candidates
-        shell: bash
-        run: |
-          set -euo pipefail
-          cpp="src/groups/bmq/bmqp/bmqp_schemagenerator.cpp"
-          hdr="src/groups/bmq/bmqp/bmqp_schemagenerator.h"
-
+          cpp=src/groups/bmq/bmqp/bmqp_schemagenerator.cpp
           ref_for() {
             case "$1" in
-              base) echo "$BASE_REF" ;;
-              pr1) echo "$PR1_REF" ;;
-              prs2) echo "$PRS2_REF" ;;
-              *) return 2 ;;
+              pr1) echo "$PR1_REF";;
+              p2a) echo "$P2A_REF";;
+              p2c) echo "$P2C_REF";;
+              p2e) echo "$GITHUB_SHA";;
+              *) return 2;;
             esac
           }
-
-          build_and_measure() {
-            local label="$1"
-            local ref="$(ref_for "$label")"
-
-            git checkout "$ref" -- "$cpp" "$hdr"
-
-            if [[ ! -d thirdparty/bde ]]; then
-              bin/build-ubuntu.sh
-            else
-              DIR_THIRDPARTY="$PWD/thirdparty" DIR_BUILD="$PWD/build" DIR_INSTALL="$PWD" cmake --preset ubuntu-x64
-              DIR_THIRDPARTY="$PWD/thirdparty" DIR_BUILD="$PWD/build" DIR_INSTALL="$PWD" \
-                cmake --build --preset ubuntu-x64 --target bmqp_schemagenerator.t
-            fi
-
-            ./build/blazingmq/tests/bmqp_schemagenerator.t 1 > "perf-results/${label}-correctness.txt"
-
-            taskset -c 0 ./build/blazingmq/tests/bmqp_schemagenerator.t -1 \
-              --benchmark_min_time=0.20s \
-              --benchmark_repetitions=7 \
-              --benchmark_report_aggregates_only=true \
-              --benchmark_out="perf-results/${label}-cliff-grid.json" \
-              --benchmark_out_format=json >/dev/null
-
-            /usr/bin/time -v ./build/blazingmq/tests/bmqp_schemagenerator.t 3 \
-              > "perf-results/${label}-convergence.txt" \
-              2> "perf-results/${label}-process-time.txt"
-
-            taskset -c 0 ./build/blazingmq/tests/bmqp_schemagenerator.t 2 \
-              > "perf-results/${label}-alloc.txt"
-          }
-
-          if [[ "${{ matrix.order }}" == "forward" ]]; then
-            configs=(base pr1 prs2)
+          if [[ "${{ matrix.order }}" == forward ]]; then
+            labels=(pr1 p2a p2c p2e)
           else
-            configs=(prs2 pr1 base)
+            labels=(p2e p2c p2a pr1)
           fi
-
-          for label in "${configs[@]}"; do
-            echo "===== ${{ matrix.condition }} / ${{ matrix.order }} / $label ====="
-            build_and_measure "$label"
+          for label in "${labels[@]}"; do
+            echo "===== ${{ matrix.order }} $label ====="
+            git checkout "$(ref_for "$label")" -- "$cpp"
+            if [[ ! -d thirdparty/bde ]]; then
+              bin/build-ubuntu.sh > "perf-results/build-$label.log" 2>&1 || {
+                tail -n 100 "perf-results/build-$label.log"; exit 1;
+              }
+            else
+              DIR_THIRDPARTY="$PWD/thirdparty" DIR_BUILD="$PWD/build" DIR_INSTALL="$PWD" \
+                cmake --preset ubuntu-x64 > "perf-results/config-$label.log" 2>&1
+              DIR_THIRDPARTY="$PWD/thirdparty" DIR_BUILD="$PWD/build" DIR_INSTALL="$PWD" \
+                cmake --build --preset ubuntu-x64 --target bmqp_schemagenerator.t \
+                > "perf-results/build-$label.log" 2>&1 || {
+                  tail -n 100 "perf-results/build-$label.log"; exit 1;
+                }
+            fi
+            ./build/blazingmq/tests/bmqp_schemagenerator.t 1 > "perf-results/$label-correctness.txt"
+            ./build/blazingmq/tests/bmqp_schemagenerator.t 2 > "perf-results/$label-allocator.txt"
+            if [[ "$label" == p2e ]]; then
+              ./build/blazingmq/tests/bmqp_schemagenerator.t 4 > perf-results/p2e-exception.txt
+              valgrind --quiet --error-exitcode=99 --leak-check=full --show-leak-kinds=definite,possible \
+                ./build/blazingmq/tests/bmqp_schemagenerator.t 4 \
+                > perf-results/p2e-valgrind.txt 2> perf-results/p2e-valgrind-errors.txt
+            fi
+            taskset -c 0 ./build/blazingmq/tests/bmqp_schemagenerator.t -1 \
+              --benchmark_min_time=0.12s --benchmark_repetitions=4 \
+              --benchmark_report_aggregates_only=true \
+              --benchmark_out="perf-results/$label-bench.json" \
+              --benchmark_out_format=json > /dev/null
+            if [[ "$label" == p2a || "$label" == p2e ]]; then
+              /usr/bin/time -v ./build/blazingmq/tests/bmqp_schemagenerator.t 3 \
+                > "perf-results/$label-convergence.txt" \
+                2> "perf-results/$label-convergence-time.txt"
+            fi
           done
-
-      - name: Save refs
+      - name: Summarize median CPU comparisons
+        if: always()
+        shell: bash
         run: |
-          {
-            echo "BASE_REF=$BASE_REF"
-            echo "PR1_REF=$PR1_REF"
-            echo "PRS2_REF=$PRS2_REF"
-            echo "HARNESS_SHA=$GITHUB_SHA"
-            echo "CONDITION=${{ matrix.condition }}"
-            echo "ORDER=${{ matrix.order }}"
-          } > perf-results/refs.txt
-
+          python3 - <<'PY'
+          import json, pathlib, statistics, os
+          root=pathlib.Path("perf-results")
+          def read(name):
+              p=root / f"{name}-bench.json"
+              if not p.exists(): return {}
+              obj=json.loads(p.read_text())
+              return {r["name"].removesuffix("_median"):float(r["cpu_time"]) for r in obj["benchmarks"] if r.get("aggregate_name")=="median"}
+          data={k:read(k) for k in ("pr1","p2a","p2c","p2e")}
+          lines=["## BDE buffer reuse evaluation", ""]
+          for old in ("pr1","p2a","p2c"):
+              keys=data[old].keys() & data["p2e"].keys()
+              if not keys:
+                  lines.append(f"{old}: no comparable data")
+                  continue
+              ratios=[data["p2e"][k]/data[old][k] for k in keys]
+              lines.append(f"P2E vs {old}: {sum(x<1 for x in ratios)}/{len(ratios)} faster; median CPU-time reduction {(1-statistics.median(ratios))*100:.2f}%; worst-case change {(max(ratios)-1)*100:+.2f}%")
+          result="\n".join(lines)+"\n"
+          print(result)
+          root.joinpath("summary.md").write_text(result)
+          with open(os.environ["GITHUB_STEP_SUMMARY"],"a") as f: f.write(result)
+          PY
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: schema-final-staged-${{ matrix.condition }}-${{ matrix.order }}
+          name: schema-bde-reuse-${{ matrix.order }}
           path: perf-results
           retention-days: 14
+          if-no-files-found: warn
