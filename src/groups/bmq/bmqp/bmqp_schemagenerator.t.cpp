@@ -22,6 +22,7 @@
 #include <bsl_algorithm.h>
 #include <bslma_newdeleteallocator.h>
 #include <bslma_testallocator.h>
+#include <bslma_testallocatorexception.h>
 #include <bslmt_barrier.h>
 #include <bslmt_threadgroup.h>
 #include <bsls_timeutil.h>
@@ -483,6 +484,54 @@ static void test3_convergenceMatrix()
     }
 }
 
+// Exercise allocation failures after a schema has already been cached.  The
+// call must either succeed or release all temporary storage on failure.
+static void test4_allocationFailureRecovery()
+{
+    bmqtst::TestHelperUtil::ignoreCheckDefAlloc() = true;
+
+    const int counts[]  = {1, 4, 16, 64};
+    const int lengths[] = {8, 32, 128, 256};
+    int exceptionsSeen = 0;
+
+    for (int i = 0; i < 4; ++i) {
+        bslma::TestAllocator allocator("schemaFailureInjection");
+        bmqp::MessageProperties mps(&allocator);
+        populateConvergenceProperties(&mps, counts[i], lengths[i], 400 + i);
+
+        bmqp::SchemaGenerator generator(&allocator);
+        const bmqp::MessagePropertiesInfo original =
+            generator.getSchemaId(&mps);
+        BMQTST_ASSERT_NE(NO_SCHEMA, original.schemaId());
+
+        for (int limit = 0; limit <= 20; ++limit) {
+            const bsls::Types::Int64 baseline = allocator.numBytesInUse();
+            allocator.setAllocationLimit(limit);
+
+            try {
+                const bmqp::MessagePropertiesInfo result =
+                    generator.getSchemaId(&mps);
+                BMQTST_ASSERT_EQ(original.schemaId(), result.schemaId());
+                BMQTST_ASSERT(!result.isRecycled());
+            }
+            catch (const bslma::TestAllocatorException&) {
+                ++exceptionsSeen;
+            }
+
+            allocator.setAllocationLimit(-1);
+            BMQTST_ASSERT_EQ(baseline, allocator.numBytesInUse());
+
+            const bmqp::MessagePropertiesInfo retry =
+                generator.getSchemaId(&mps);
+            BMQTST_ASSERT_EQ(original.schemaId(), retry.schemaId());
+            BMQTST_ASSERT(!retry.isRecycled());
+        }
+    }
+
+    BMQTST_ASSERT(exceptionsSeen > 0);
+    cout << "FAILURE_INJECTION_OK exceptions=" << exceptionsSeen << endl;
+}
+
 #ifdef BMQTST_BENCHMARK_ENABLED
 static void testN1_getSchemaIdHot_GoogleBenchmark(benchmark::State& state)
 {
@@ -525,6 +574,7 @@ int main(int argc, char* argv[])
     case 0:
     case 3: test3_convergenceMatrix(); break;
     case 2: test2_allocatorProfile(); break;
+    case 4: test4_allocationFailureRecovery(); break;
     case 1: test1_breathingTest(); break;
     case -1:
         BMQTST_BENCHMARK_WITH_ARGS(testN1_getSchemaIdHot,
