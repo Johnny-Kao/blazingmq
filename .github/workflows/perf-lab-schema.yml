@@ -8,7 +8,7 @@ concurrency:
   cancel-in-progress: true
 jobs:
   compare:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 110
     strategy:
       fail-fast: false
@@ -33,6 +33,11 @@ jobs:
             autoconf automake build-essential gdb cmake ninja-build pkg-config \
             bison libfl-dev libbenchmark-dev libgmock-dev libgtest-dev libtool \
             libz-dev libssl-dev util-linux time valgrind
+          echo "Static OpenSSL link check (before building BDE):"
+          pkg-config --libs --static libcrypto
+          printf 'int main() { return 0; }\n' |
+            c++ -x c++ - -o /tmp/openssl-link-smoke $(pkg-config --libs --static libcrypto)
+          /tmp/openssl-link-smoke
       - name: Build and validate all variants
         shell: bash
         run: |
