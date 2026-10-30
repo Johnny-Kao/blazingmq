@@ -19,6 +19,7 @@
 #include <bmqscm_version.h>
 
 // BDE
+#include <bdlma_localsequentialallocator.h>
 #include <bsl_utility.h>
 
 namespace BloombergLP {
@@ -81,9 +82,19 @@ SchemaGenerator::getSchemaId(const MessageProperties* mps)
         return MessagePropertiesInfo();  // RETURN
     }
 
-    MessagePropertiesIterator it(mps);
-    bsl::string             key(d_allocator_p);
+    bdlma::LocalSequentialAllocator<1024> localAllocator(d_allocator_p);
+    bsl::string key(&localAllocator);
 
+    if (mps->totalSize() > 512) {
+        bsl::size_t keyLength = 0;
+        MessagePropertiesIterator sizeIt(mps);
+        while (sizeIt.hasNext()) {
+            keyLength += 1 + sizeIt.name().size();
+        }
+        key.reserve(keyLength);
+    }
+
+    MessagePropertiesIterator it(mps);
     while (it.hasNext()) {
         key += '_';
         key += it.name();
