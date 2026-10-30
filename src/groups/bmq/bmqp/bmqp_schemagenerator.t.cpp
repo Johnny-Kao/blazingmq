@@ -101,7 +101,7 @@ static void test2_allocatorProfile()
     bmqtst::TestHelperUtil::ignoreCheckDefAlloc() = true;
 
     const int propertyCounts[] = {1, 4, 8, 16, 32, 64};
-    const int nameLengths[]    = {8, 32, 64, 128, 256};
+    const int nameLengths[]    = {8, 32, 64, 128, 256, 1023, 1024, 1025};
 
     const int numPropertyCounts =
         static_cast<int>(sizeof(propertyCounts) / sizeof(*propertyCounts));
@@ -532,6 +532,62 @@ static void test4_allocationFailureRecovery()
     cout << "FAILURE_INJECTION_OK exceptions=" << exceptionsSeen << endl;
 }
 
+// Verify that small, stack-boundary, overflow, and protocol-maximum schema
+// keys all produce stable, distinct identifiers with no allocator retention.
+static void test5_schemaKeyBoundaryCases()
+{
+    bmqtst::TestHelperUtil::ignoreCheckDefAlloc() = true;
+    const int counts[]  = {1, 4, 8, 64, 255};
+    const int lengths[] = {8, 255, 256, 1023, 1024, 1025, 4095};
+    int cases = 0;
+
+    for (int c = 0; c < 5; ++c) {
+        for (int n = 0; n < 7; ++n) {
+            bslma::TestAllocator allocator("schemaBoundary");
+            {
+                bmqp::MessageProperties first(&allocator);
+                bmqp::MessageProperties different(&allocator);
+
+                for (int i = 0; i < counts[c]; ++i) {
+                    bsl::string name("p", &allocator);
+                    name += bsl::to_string(i);
+                    if (static_cast<int>(name.size()) < lengths[n]) {
+                        name.append(lengths[n] - name.size(), 'x');
+                    }
+                    BMQTST_ASSERT_EQ(0, first.setPropertyAsString(name, "v"));
+
+                    name[0] = 'q';
+                    BMQTST_ASSERT_EQ(
+                        0, different.setPropertyAsString(name, "v"));
+                }
+
+                bmqp::SchemaGenerator generator(&allocator);
+                const bmqp::MessagePropertiesInfo a =
+                    generator.getSchemaId(&first);
+                const bmqp::MessagePropertiesInfo b =
+                    generator.getSchemaId(&first);
+                const bmqp::MessagePropertiesInfo c2 =
+                    generator.getSchemaId(&different);
+                const bmqp::MessagePropertiesInfo d =
+                    generator.getSchemaId(&different);
+
+                BMQTST_ASSERT_NE(NO_SCHEMA, a.schemaId());
+                BMQTST_ASSERT_EQ(a.schemaId(), b.schemaId());
+                BMQTST_ASSERT_NE(a.schemaId(), c2.schemaId());
+                BMQTST_ASSERT_EQ(c2.schemaId(), d.schemaId());
+                BMQTST_ASSERT(a.isRecycled());
+                BMQTST_ASSERT(!b.isRecycled());
+                BMQTST_ASSERT(c2.isRecycled());
+                BMQTST_ASSERT(!d.isRecycled());
+                ++cases;
+            }
+            BMQTST_ASSERT_EQ(0, allocator.numBlocksInUse());
+        }
+    }
+
+    cout << "BOUNDARY_CASES_OK cases=" << cases << endl;
+}
+
 #ifdef BMQTST_BENCHMARK_ENABLED
 static void testN1_getSchemaIdHot_GoogleBenchmark(benchmark::State& state)
 {
@@ -575,11 +631,12 @@ int main(int argc, char* argv[])
     case 3: test3_convergenceMatrix(); break;
     case 2: test2_allocatorProfile(); break;
     case 4: test4_allocationFailureRecovery(); break;
+    case 5: test5_schemaKeyBoundaryCases(); break;
     case 1: test1_breathingTest(); break;
     case -1:
         BMQTST_BENCHMARK_WITH_ARGS(testN1_getSchemaIdHot,
                                    ArgsProduct({{1, 4, 8, 16, 32, 64},
-                                                {8, 32, 64, 128, 256}})
+                                                {8, 32, 64, 128, 256, 1023, 1024, 1025}})
                                        ->Unit(benchmark::kNanosecond));
         break;
     default: {
