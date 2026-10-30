@@ -83,7 +83,7 @@ SchemaGenerator::getSchemaId(const MessageProperties* mps)
         return MessagePropertiesInfo();  // RETURN
     }
 
-    bdlsb::MemOutStreamBuf buffer(d_allocator_p);
+    bdlsb::MemOutStreamBuf buffer(1024, d_allocator_p);
     MessagePropertiesIterator it(mps);
     while (it.hasNext()) {
         buffer.sputc('_');
