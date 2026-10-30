@@ -1,12 +1,12 @@
-name: P2E Repeated Concurrency Validation
+name: P2A Exception Safety Regression and Performance
 on:
   push:
-    branches: [research/blazingmq-p2e-concurrency-repeat]
+    branches: [research/blazingmq-pr1806-raii-fix]
   workflow_dispatch:
 permissions:
   contents: read
 concurrency:
-  group: p2e-repeated-concurrency
+  group: p2a-original-exception-safety
   cancel-in-progress: true
 jobs:
   compare:
@@ -47,15 +47,15 @@ jobs:
           ref_for() {
             case "$1" in
               pr1) echo "$PR1_REF";;
-              p2a) echo "$P2A_REF";;
-              p2e) echo "$GITHUB_SHA";;
+              p2a-original) echo "$P2A_REF";;
+              p2a-fixed) echo "$GITHUB_SHA";;
               *) return 2;;
             esac
           }
           if [[ "${{ matrix.order }}" == forward ]]; then
-            labels=(pr1 p2e p2a)
+            labels=(pr1 p2a-fixed p2a-original)
           else
-            labels=(p2a p2e pr1)
+            labels=(p2a-original p2a-fixed pr1)
           fi
           for label in "${labels[@]}"; do
             echo "===== ${{ matrix.order }} $label ====="
@@ -77,7 +77,7 @@ jobs:
             ./build/blazingmq/tests/bmqp_schemagenerator.t 2 > "perf-results/$label-allocator.txt"
             ./build/blazingmq/tests/bmqp_schemagenerator.t 5 > "perf-results/$label-boundary.txt"
             ./build/blazingmq/tests/bmqp_schemagenerator.t 6 > "perf-results/$label-concurrency-stress.txt"
-            if [[ "$label" != p2a ]]; then
+            if [[ "$label" != p2a-original ]]; then
               ./build/blazingmq/tests/bmqp_schemagenerator.t 4 > "perf-results/$label-exception.txt"
               valgrind --quiet --error-exitcode=99 --leak-check=full --show-leak-kinds=definite,possible \
                 ./build/blazingmq/tests/bmqp_schemagenerator.t 4 \
@@ -88,9 +88,9 @@ jobs:
               # aborting the full comparative benchmark.
               if ./build/blazingmq/tests/bmqp_schemagenerator.t 4 \
                   > "perf-results/$label-exception.txt" 2>&1; then
-                echo "p2a exception test: PASS" > "perf-results/p2a-exception-status.txt"
+                echo "p2a-original exception test: PASS" > "perf-results/p2a-original-exception-status.txt"
               else
-                echo "p2a exception test: FAIL (known candidate issue)" > "perf-results/p2a-exception-status.txt"
+                echo "p2a-original exception test: FAIL (known upstream issue)" > "perf-results/p2a-original-exception-status.txt"
               fi
             fi
             # Three timing passes per variant, preserving paired runner order.
@@ -111,7 +111,7 @@ jobs:
           python3 - <<'PY'
           import json, pathlib, statistics, os, re
           root=pathlib.Path("perf-results")
-          variants=("pr1","p2e","p2a")
+          variants=("pr1","p2a-fixed","p2a-original")
           def bench(name,run):
               p=root / f"{name}-bench-{run}.json"
               if not p.exists(): return {}
@@ -129,7 +129,7 @@ jobs:
                   data[key]={k:float(z[k]) for k in
                              ("throughput_ops_s","p50_ns","p99_ns")}
               return data
-          lines=["## P2E repeated concurrency evaluation", ""]
+          lines=["## P2A exception-safety fix vs upstream P2A", ""]
           for name in variants:
               p=root/f"{name}-concurrency-stress.txt"
               if p.exists():
@@ -140,8 +140,8 @@ jobs:
                   lines.append(f"{name}: stress cases={m.group(1) if m else 'MISSING'}; invariant failures={len(failures)}")
               e=root/f"{name}-exception-status.txt"
               if e.exists(): lines.append(f"{name}: exception injection {e.read_text().strip()}")
-          for candidate in ("p2e","p2a"):
-              for baseline in ("pr1",) if candidate=="p2a" else ("pr1","p2a"):
+          for candidate in ("p2a-fixed","p2a-original"):
+              for baseline in ("pr1",) if candidate=="p2a-original" else ("pr1","p2a-original"):
                   ratios, throughputs, p50s, p99s=[],[],[],[]
                   for repeat in (1,2,3):
                       aa,bb=bench(candidate,repeat),bench(baseline,repeat)
@@ -163,7 +163,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: p2e-concurrency-${{ matrix.order }}
+          name: p2a-raii-${{ matrix.order }}
           path: perf-results
           retention-days: 30
           if-no-files-found: warn
