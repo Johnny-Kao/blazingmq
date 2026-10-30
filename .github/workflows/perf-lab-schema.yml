@@ -1,12 +1,12 @@
-name: P2E Repeated Concurrency Validation
+name: P2E Affinity ABBA Validation
 on:
   push:
-    branches: [research/blazingmq-p2e-concurrency-repeat]
+    branches: [research/blazingmq-p2e-affinity-abba]
   workflow_dispatch:
 permissions:
   contents: read
 concurrency:
-  group: p2e-repeated-concurrency
+  group: p2e-affinity-abba
   cancel-in-progress: true
 jobs:
   compare:
@@ -18,7 +18,6 @@ jobs:
         order: [forward, reverse]
     env:
       PR1_REF: 8f30d3b7f05a41167e229ee3787fa0b769dcbc4e
-      P2A_REF: 1e90f5758560adda3e0d85bf1dfeaf4d1a7bfc25
     steps:
       - uses: actions/checkout@v4
         with:
@@ -28,7 +27,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p perf-results
-          { date -u; uname -a; lscpu; free -h; systemd-detect-virt || true; } > perf-results/environment.txt
+          { date -u; uname -a; lscpu; lscpu -e=CPU,SOCKET,CORE,ONLINE; free -h; systemd-detect-virt || true; } > perf-results/environment.txt
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             autoconf automake build-essential gdb cmake ninja-build pkg-config \
@@ -39,27 +38,16 @@ jobs:
           printf 'int main() { return 0; }\n' |
             c++ -x c++ - -o /tmp/openssl-link-smoke $(pkg-config --libs --static libcrypto)
           /tmp/openssl-link-smoke
-      - name: Build and validate all variants
+      - name: Build and cache two variant binaries
         shell: bash
         run: |
           set -euo pipefail
           cpp=src/groups/bmq/bmqp/bmqp_schemagenerator.cpp
-          ref_for() {
-            case "$1" in
-              pr1) echo "$PR1_REF";;
-              p2a) echo "$P2A_REF";;
-              p2e) echo "$GITHUB_SHA";;
-              *) return 2;;
-            esac
-          }
-          if [[ "${{ matrix.order }}" == forward ]]; then
-            labels=(pr1 p2e p2a)
-          else
-            labels=(p2a p2e pr1)
-          fi
-          for label in "${labels[@]}"; do
-            echo "===== ${{ matrix.order }} $label ====="
-            git checkout "$(ref_for "$label")" -- "$cpp"
+          executable=./build/blazingmq/tests/bmqp_schemagenerator.t
+          for label in pr1 p2e; do
+            if [[ "$label" == pr1 ]]; then ref="$PR1_REF"; else ref="$GITHUB_SHA"; fi
+            echo "BUILD $label / $ref"
+            git checkout "$ref" -- "$cpp"
             if [[ ! -d thirdparty/bde ]]; then
               bin/build-ubuntu.sh > "perf-results/build-$label.log" 2>&1 || {
                 tail -n 100 "perf-results/build-$label.log"; exit 1;
@@ -73,97 +61,110 @@ jobs:
                   tail -n 100 "perf-results/build-$label.log"; exit 1;
                 }
             fi
-            ./build/blazingmq/tests/bmqp_schemagenerator.t 1 > "perf-results/$label-correctness.txt"
-            ./build/blazingmq/tests/bmqp_schemagenerator.t 2 > "perf-results/$label-allocator.txt"
-            ./build/blazingmq/tests/bmqp_schemagenerator.t 5 > "perf-results/$label-boundary.txt"
-            ./build/blazingmq/tests/bmqp_schemagenerator.t 6 > "perf-results/$label-concurrency-stress.txt"
-            if [[ "$label" != p2a ]]; then
-              ./build/blazingmq/tests/bmqp_schemagenerator.t 4 > "perf-results/$label-exception.txt"
-              valgrind --quiet --error-exitcode=99 --leak-check=full --show-leak-kinds=definite,possible \
-                ./build/blazingmq/tests/bmqp_schemagenerator.t 4 \
-                > "perf-results/$label-valgrind.txt" 2> "perf-results/$label-valgrind-errors.txt"
-
-            else
-              # Research control: record P2A's known exception-safety gap without
-              # aborting the full comparative benchmark.
-              if ./build/blazingmq/tests/bmqp_schemagenerator.t 4 \
-                  > "perf-results/$label-exception.txt" 2>&1; then
-                echo "p2a exception test: PASS" > "perf-results/p2a-exception-status.txt"
-              else
-                echo "p2a exception test: FAIL (known candidate issue)" > "perf-results/p2a-exception-status.txt"
-              fi
+            cp -p "$executable" "$executable.$label"
+            "$executable.$label" 1 > "perf-results/$label-correctness.txt"
+            "$executable.$label" 5 > "perf-results/$label-boundary.txt"
+            if [[ "$label" == p2e ]]; then
+              "$executable.$label" 4 > "perf-results/$label-exception.txt"
             fi
-            # Three timing passes per variant, preserving paired runner order.
-            for repeat in 1 2 3; do
-              taskset -c 0 ./build/blazingmq/tests/bmqp_schemagenerator.t -1 \
-                --benchmark_min_time=0.12s --benchmark_repetitions=4 \
-                --benchmark_report_aggregates_only=true \
-                --benchmark_out="perf-results/$label-bench-$repeat.json" \
-                --benchmark_out_format=json > /dev/null
-              ./build/blazingmq/tests/bmqp_schemagenerator.t 3 \
-                > "perf-results/$label-convergence-$repeat.txt"
+          done
+          sha256sum "$executable.pr1" "$executable.p2e" > perf-results/binaries-sha256.txt
+          ldd "$executable.p2e" > perf-results/linked-libraries.txt
+      - name: ABBA paired measures under 1, 2 and 4 CPU affinity
+        shell: bash
+        run: |
+          set -euo pipefail
+          cpu_order=$(python3 - <<'PY'
+          import os
+          cpus=sorted(os.sched_getaffinity(0))
+          primary=[]
+          siblings=[]
+          seen=set()
+          for cpu in cpus:
+              base=f"/sys/devices/system/cpu/cpu{cpu}/topology/"
+              with open(base+"core_id") as f: core=f.read().strip()
+              with open(base+"physical_package_id") as f: package=f.read().strip()
+              identity=(package,core)
+              if identity in seen: siblings.append(cpu)
+              else: seen.add(identity); primary.append(cpu)
+          ordered=primary+siblings
+          assert len(ordered)>=4, f"Need at least four available CPUs: {ordered}"
+          print(",".join(map(str,ordered)))
+          PY
+          )
+          echo "$cpu_order" | tee perf-results/affinity.txt
+          if [[ "${{ matrix.order }}" == forward ]]; then
+            labels=(pr1 p2e p2e pr1)
+          else
+            labels=(p2e pr1 pr1 p2e)
+          fi
+          for vcpu in 1 2 4; do
+            mask=$(python3 -c 'import sys;print(",".join(sys.argv[1].split(",")[:int(sys.argv[2])]))' "$cpu_order" "$vcpu")
+            echo "cpus=$vcpu mask=$mask" | tee -a perf-results/affinity.txt
+            for i in 0 1 2 3; do
+              label=${labels[$i]}
+              echo "CASE $label cpu=$vcpu slot=$i"
+              taskset -c "$mask" "./build/blazingmq/tests/bmqp_schemagenerator.t.$label" 3 \
+                > "perf-results/$label-cpu$vcpu-slot$i.txt"
             done
           done
-      - name: Summarize repeated paired CPU and concurrency comparisons
+          mask=$(python3 -c 'import sys;print(",".join(sys.argv[1].split(",")[:2]))' "$cpu_order")
+          for label in pr1 p2e; do
+            taskset -c "$mask" "./build/blazingmq/tests/bmqp_schemagenerator.t.$label" 6 \
+              > "perf-results/$label-affinity-stress.txt"
+          done
+      - name: Summarize matched ratios across CPU masks and thread counts
         if: always()
         shell: bash
         run: |
           python3 - <<'PY'
-          import json, pathlib, statistics, os, re
+          import pathlib,os,re,statistics
           root=pathlib.Path("perf-results")
-          variants=("pr1","p2e","p2a")
-          def bench(name,run):
-              p=root / f"{name}-bench-{run}.json"
-              if not p.exists(): return {}
-              return {x["name"].removesuffix("_median"):float(x["cpu_time"])
-                      for x in json.loads(p.read_text())["benchmarks"]
-                      if x.get("aggregate_name")=="median"}
-          def convergence(name,run):
-              p=root / f"{name}-convergence-{run}.txt"
-              if not p.exists(): return {}
-              data={}
-              for line in p.read_text().splitlines():
-                  if not line.startswith("CONVERGENCE"): continue
+          lines=["## P2E affinity-controlled ABBA comparison", ""]
+          def load(path):
+              a={}
+              if not path.exists():return a
+              for line in path.read_text().splitlines():
+                  if not line.startswith("CONVERGENCE "):continue
                   z=dict(re.findall(r"(\w+)=([^ ]+)",line))
-                  key=(z["schema"],z["target_hit_rate"],z["threads"])
-                  data[key]={k:float(z[k]) for k in
-                             ("throughput_ops_s","p50_ns","p99_ns")}
-              return data
-          lines=["## P2E repeated concurrency evaluation", ""]
-          for name in variants:
-              p=root/f"{name}-concurrency-stress.txt"
+                  k=(z["schema"],int(z["target_hit_rate"]),int(z["threads"]))
+                  a[k]={f:float(z[f]) for f in ("throughput_ops_s","p50_ns","p99_ns")}
+              return a
+          for cpu in (1,2,4):
+              data={}
+              for name in ("pr1","p2e"):
+                  data[name]=[load(p) for p in sorted(root.glob(f"{name}-cpu{cpu}-slot*.txt"))]
+              a,b=data["p2e"],data["pr1"]
+              if len(a)!=2 or len(b)!=2:
+                  lines.append(f"cpus={cpu}: incomplete measurements ({len(a)} vs {len(b)})")
+                  continue
+              keys=set.intersection(*(set(x) for x in a+b))
+              for group in ("all","t1","t2","t4","t8","t16","h0","h50","h90","h99","h100"):
+                  chosen=sorted(k for k in keys if group=="all" or
+                                (group.startswith("t") and k[2]==int(group[1:])) or
+                                (group.startswith("h") and k[1]==int(group[1:])))
+                  if not chosen:continue
+                  d={}
+                  for metric in ("throughput_ops_s","p50_ns","p99_ns"):
+                      d[metric]=[statistics.median(x[k][metric] for x in a)/statistics.median(x[k][metric] for x in b) for k in chosen]
+                  r=d["throughput_ops_s"]
+                  lines.append(f"cpus={cpu} group={group}: cases={len(r)} throughput={(statistics.median(r)-1)*100:+.2f}% faster={sum(v>1 for v in r)}/{len(r)} p50={(statistics.median(d['p50_ns'])-1)*100:+.2f}% p99={(statistics.median(d['p99_ns'])-1)*100:+.2f}%")
+          for name in ("pr1","p2e"):
+              p=root/f"{name}-affinity-stress.txt"
               if p.exists():
-                  content=p.read_text()
-                  m=re.search(r"SCHEMA_STRESS_OK cases=(\d+)",content)
-                  failures=[x for x in content.splitlines()
-                            if x.startswith("SCHEMA_STRESS ") and "failures=0" not in x]
-                  lines.append(f"{name}: stress cases={m.group(1) if m else 'MISSING'}; invariant failures={len(failures)}")
-              e=root/f"{name}-exception-status.txt"
-              if e.exists(): lines.append(f"{name}: exception injection {e.read_text().strip()}")
-          for candidate in ("p2e","p2a"):
-              for baseline in ("pr1",) if candidate=="p2a" else ("pr1","p2a"):
-                  ratios, throughputs, p50s, p99s=[],[],[],[]
-                  for repeat in (1,2,3):
-                      aa,bb=bench(candidate,repeat),bench(baseline,repeat)
-                      ratios.extend(aa[k]/bb[k] for k in aa.keys() & bb.keys())
-                      cc,dd=convergence(candidate,repeat),convergence(baseline,repeat)
-                      for k in cc.keys() & dd.keys():
-                          throughputs.append(cc[k]["throughput_ops_s"]/dd[k]["throughput_ops_s"])
-                          p50s.append(cc[k]["p50_ns"]/dd[k]["p50_ns"])
-                          p99s.append(cc[k]["p99_ns"]/dd[k]["p99_ns"])
-                  if ratios:
-                      lines.append(f"{candidate} vs {baseline}: CPU {len(ratios)} paired cases; median improvement {(1-statistics.median(ratios))*100:.2f}%; faster {sum(x<1 for x in ratios)}/{len(ratios)}; worst regression {(max(ratios)-1)*100:+.2f}%")
-                  if throughputs:
-                      lines.append(f"{candidate} vs {baseline}: concurrency {len(throughputs)} paired cases; median throughput {(statistics.median(throughputs)-1)*100:+.2f}%; faster {sum(x>1 for x in throughputs)}/{len(throughputs)}; median p50 {(statistics.median(p50s)-1)*100:+.2f}%; median p99 {(statistics.median(p99s)-1)*100:+.2f}%")
-          result="\n".join(lines)+"\n"
-          print(result)
-          root.joinpath("summary.md").write_text(result)
-          with open(os.environ["GITHUB_STEP_SUMMARY"],"a") as f:f.write(result)
+                  s=p.read_text()
+                  ok=re.search(r"SCHEMA_STRESS_OK cases=(\d+)",s)
+                  failed=[l for l in s.splitlines() if l.startswith("SCHEMA_STRESS ") and "failures=0" not in l]
+                  lines.append(f"{name}: stress cases={ok.group(1) if ok else 'MISSING'}; failures={len(failed)}")
+          report="\n".join(lines)+"\n"
+          print(report)
+          root.joinpath("summary.md").write_text(report)
+          with open(os.environ["GITHUB_STEP_SUMMARY"],"a") as f:f.write(report)
           PY
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: p2e-concurrency-${{ matrix.order }}
+          name: p2e-affinity-${{ matrix.order }}
           path: perf-results
           retention-days: 30
           if-no-files-found: warn
