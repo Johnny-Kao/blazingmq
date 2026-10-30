@@ -19,6 +19,8 @@
 #include <bmqscm_version.h>
 
 // BDE
+#include <bdlma_localsequentialallocator.h>
+#include <bdlsb_memoutstreambuf.h>
 #include <bsl_utility.h>
 
 namespace BloombergLP {
@@ -81,13 +83,15 @@ SchemaGenerator::getSchemaId(const MessageProperties* mps)
         return MessagePropertiesInfo();  // RETURN
     }
 
+    bdlsb::MemOutStreamBuf buffer(d_allocator_p);
     MessagePropertiesIterator it(mps);
-    bsl::string             key(d_allocator_p);
-
     while (it.hasNext()) {
-        key += '_';
-        key += it.name();
+        buffer.sputc('_');
+        buffer.sputn(it.name().data(), it.name().size());
     }
+
+    bdlma::LocalSequentialAllocator<1024> localAllocator(d_allocator_p);
+    bsl::string key(buffer.data(), buffer.length(), &localAllocator);
 
     typedef bsl::pair<ContextMap::iterator, bool> InsertOrLookup;
 
