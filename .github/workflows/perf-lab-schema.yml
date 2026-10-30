@@ -1,12 +1,12 @@
-name: Schema MemOutStreamBuf Evaluation
+name: P2E Repeated Concurrency Validation
 on:
   push:
-    branches: [research/blazingmq-memout-comparison]
+    branches: [research/blazingmq-p2e-concurrency-repeat]
   workflow_dispatch:
 permissions:
   contents: read
 concurrency:
-  group: schema-memout-eval
+  group: p2e-repeated-concurrency
   cancel-in-progress: true
 jobs:
   compare:
@@ -19,8 +19,6 @@ jobs:
     env:
       PR1_REF: 8f30d3b7f05a41167e229ee3787fa0b769dcbc4e
       P2A_REF: 1e90f5758560adda3e0d85bf1dfeaf4d1a7bfc25
-      P2E_REF: 61abf5c7e647ca24b1a899f03a46f6c3677be653
-      MEMOUT0_REF: a0f3bf42625a63f14c41968e36e77cead374c37a
     steps:
       - uses: actions/checkout@v4
         with:
@@ -50,16 +48,14 @@ jobs:
             case "$1" in
               pr1) echo "$PR1_REF";;
               p2a) echo "$P2A_REF";;
-              memout0) echo "$MEMOUT0_REF";;
-              memout1024) echo "$GITHUB_SHA";;
-              p2e) echo "$P2E_REF";;
+              p2e) echo "$GITHUB_SHA";;
               *) return 2;;
             esac
           }
           if [[ "${{ matrix.order }}" == forward ]]; then
-            labels=(pr1 memout0 memout1024 p2e p2a)
+            labels=(pr1 p2e p2a)
           else
-            labels=(p2a p2e memout1024 memout0 pr1)
+            labels=(p2a p2e pr1)
           fi
           for label in "${labels[@]}"; do
             echo "===== ${{ matrix.order }} $label ====="
@@ -80,16 +76,13 @@ jobs:
             ./build/blazingmq/tests/bmqp_schemagenerator.t 1 > "perf-results/$label-correctness.txt"
             ./build/blazingmq/tests/bmqp_schemagenerator.t 2 > "perf-results/$label-allocator.txt"
             ./build/blazingmq/tests/bmqp_schemagenerator.t 5 > "perf-results/$label-boundary.txt"
-            if [[ "$label" == pr1 || "$label" == memout0 || "$label" == memout1024 || "$label" == p2e ]]; then
+            ./build/blazingmq/tests/bmqp_schemagenerator.t 6 > "perf-results/$label-concurrency-stress.txt"
+            if [[ "$label" != p2a ]]; then
               ./build/blazingmq/tests/bmqp_schemagenerator.t 4 > "perf-results/$label-exception.txt"
               valgrind --quiet --error-exitcode=99 --leak-check=full --show-leak-kinds=definite,possible \
                 ./build/blazingmq/tests/bmqp_schemagenerator.t 4 \
                 > "perf-results/$label-valgrind.txt" 2> "perf-results/$label-valgrind-errors.txt"
-              if [[ "$label" == memout0 || "$label" == memout1024 || "$label" == p2e ]]; then
-                valgrind --quiet --error-exitcode=99 --leak-check=full --show-leak-kinds=definite,possible \
-                  ./build/blazingmq/tests/bmqp_schemagenerator.t 5 \
-                  > "perf-results/$label-boundary-valgrind.txt" 2> "perf-results/$label-boundary-valgrind-errors.txt"
-              fi
+
             else
               # Research control: record P2A's known exception-safety gap without
               # aborting the full comparative benchmark.
@@ -100,49 +93,77 @@ jobs:
                 echo "p2a exception test: FAIL (known candidate issue)" > "perf-results/p2a-exception-status.txt"
               fi
             fi
-            taskset -c 0 ./build/blazingmq/tests/bmqp_schemagenerator.t -1 \
-              --benchmark_min_time=0.12s --benchmark_repetitions=4 \
-              --benchmark_report_aggregates_only=true \
-              --benchmark_out="perf-results/$label-bench.json" \
-              --benchmark_out_format=json > /dev/null
-            if true; then
-              /usr/bin/time -v ./build/blazingmq/tests/bmqp_schemagenerator.t 3 \
-                > "perf-results/$label-convergence.txt" \
-                2> "perf-results/$label-convergence-time.txt"
-            fi
+            # Three timing passes per variant, preserving paired runner order.
+            for repeat in 1 2 3; do
+              taskset -c 0 ./build/blazingmq/tests/bmqp_schemagenerator.t -1 \
+                --benchmark_min_time=0.12s --benchmark_repetitions=4 \
+                --benchmark_report_aggregates_only=true \
+                --benchmark_out="perf-results/$label-bench-$repeat.json" \
+                --benchmark_out_format=json > /dev/null
+              ./build/blazingmq/tests/bmqp_schemagenerator.t 3 \
+                > "perf-results/$label-convergence-$repeat.txt"
+            done
           done
-      - name: Summarize median CPU comparisons
+      - name: Summarize repeated paired CPU and concurrency comparisons
         if: always()
         shell: bash
         run: |
           python3 - <<'PY'
-          import json, pathlib, statistics, os
+          import json, pathlib, statistics, os, re
           root=pathlib.Path("perf-results")
-          def read(name):
-              p=root / f"{name}-bench.json"
+          variants=("pr1","p2e","p2a")
+          def bench(name,run):
+              p=root / f"{name}-bench-{run}.json"
               if not p.exists(): return {}
-              obj=json.loads(p.read_text())
-              return {r["name"].removesuffix("_median"):float(r["cpu_time"]) for r in obj["benchmarks"] if r.get("aggregate_name")=="median"}
-          data={k:read(k) for k in ("pr1","memout0","memout1024","p2a","p2e")}
-          lines=["## MemOutStreamBuf vs P2E / P2A on pinned CPU (median CPU time)", ""]
-          for target in ("memout0","memout1024","p2e","p2a"): 
-              for old in ("pr1", "p2e", "p2a"):
-                  if old == target: continue
-                  keys=data[old].keys() & data[target].keys()
-                  if not keys:
-                      lines.append(f"{target} vs {old}: no comparable data")
-                      continue
-                  ratios=[data[target][k]/data[old][k] for k in keys]
-                  lines.append(f"{target} vs {old}: {sum(x<1 for x in ratios)}/{len(ratios)} faster; median CPU-time reduction {(1-statistics.median(ratios))*100:.2f}%; worst-case regression {(max(ratios)-1)*100:+.2f}%")
+              return {x["name"].removesuffix("_median"):float(x["cpu_time"])
+                      for x in json.loads(p.read_text())["benchmarks"]
+                      if x.get("aggregate_name")=="median"}
+          def convergence(name,run):
+              p=root / f"{name}-convergence-{run}.txt"
+              if not p.exists(): return {}
+              data={}
+              for line in p.read_text().splitlines():
+                  if not line.startswith("CONVERGENCE"): continue
+                  z=dict(re.findall(r"(\w+)=([^ ]+)",line))
+                  key=(z["schema"],z["target_hit_rate"],z["threads"])
+                  data[key]={k:float(z[k]) for k in
+                             ("throughput_ops_s","p50_ns","p99_ns")}
+              return data
+          lines=["## P2E repeated concurrency evaluation", ""]
+          for name in variants:
+              p=root/f"{name}-concurrency-stress.txt"
+              if p.exists():
+                  content=p.read_text()
+                  m=re.search(r"SCHEMA_STRESS_OK cases=(\d+)",content)
+                  failures=[x for x in content.splitlines()
+                            if x.startswith("SCHEMA_STRESS ") and "failures=0" not in x]
+                  lines.append(f"{name}: stress cases={m.group(1) if m else 'MISSING'}; invariant failures={len(failures)}")
+              e=root/f"{name}-exception-status.txt"
+              if e.exists(): lines.append(f"{name}: exception injection {e.read_text().strip()}")
+          for candidate in ("p2e","p2a"):
+              for baseline in ("pr1",) if candidate=="p2a" else ("pr1","p2a"):
+                  ratios, throughputs, p50s, p99s=[],[],[],[]
+                  for repeat in (1,2,3):
+                      aa,bb=bench(candidate,repeat),bench(baseline,repeat)
+                      ratios.extend(aa[k]/bb[k] for k in aa.keys() & bb.keys())
+                      cc,dd=convergence(candidate,repeat),convergence(baseline,repeat)
+                      for k in cc.keys() & dd.keys():
+                          throughputs.append(cc[k]["throughput_ops_s"]/dd[k]["throughput_ops_s"])
+                          p50s.append(cc[k]["p50_ns"]/dd[k]["p50_ns"])
+                          p99s.append(cc[k]["p99_ns"]/dd[k]["p99_ns"])
+                  if ratios:
+                      lines.append(f"{candidate} vs {baseline}: CPU {len(ratios)} paired cases; median improvement {(1-statistics.median(ratios))*100:.2f}%; faster {sum(x<1 for x in ratios)}/{len(ratios)}; worst regression {(max(ratios)-1)*100:+.2f}%")
+                  if throughputs:
+                      lines.append(f"{candidate} vs {baseline}: concurrency {len(throughputs)} paired cases; median throughput {(statistics.median(throughputs)-1)*100:+.2f}%; faster {sum(x>1 for x in throughputs)}/{len(throughputs)}; median p50 {(statistics.median(p50s)-1)*100:+.2f}%; median p99 {(statistics.median(p99s)-1)*100:+.2f}%")
           result="\n".join(lines)+"\n"
           print(result)
           root.joinpath("summary.md").write_text(result)
-          with open(os.environ["GITHUB_STEP_SUMMARY"],"a") as f: f.write(result)
+          with open(os.environ["GITHUB_STEP_SUMMARY"],"a") as f:f.write(result)
           PY
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: schema-memout-${{ matrix.order }}
+          name: p2e-concurrency-${{ matrix.order }}
           path: perf-results
-          retention-days: 14
+          retention-days: 30
           if-no-files-found: warn
