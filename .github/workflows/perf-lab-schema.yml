@@ -1,12 +1,12 @@
-name: Schema Minimal Key Evaluation
+name: Schema MemOutStreamBuf Evaluation
 on:
   push:
-    branches: [research/blazingmq-minimal-key-eval]
+    branches: [research/blazingmq-memout-comparison]
   workflow_dispatch:
 permissions:
   contents: read
 concurrency:
-  group: schema-minimal-key-eval
+  group: schema-memout-eval
   cancel-in-progress: true
 jobs:
   compare:
@@ -20,7 +20,7 @@ jobs:
       PR1_REF: 8f30d3b7f05a41167e229ee3787fa0b769dcbc4e
       P2A_REF: 1e90f5758560adda3e0d85bf1dfeaf4d1a7bfc25
       P2E_REF: 61abf5c7e647ca24b1a899f03a46f6c3677be653
-      EXACT_REF: 5b3d456becbb66e293df3fffc25b3f94e86526d8
+      MEMOUT0_REF: a0f3bf42625a63f14c41968e36e77cead374c37a
     steps:
       - uses: actions/checkout@v4
         with:
@@ -50,16 +50,16 @@ jobs:
             case "$1" in
               pr1) echo "$PR1_REF";;
               p2a) echo "$P2A_REF";;
-              exact) echo "$EXACT_REF";;
-              direct) echo "$GITHUB_SHA";;
+              memout0) echo "$MEMOUT0_REF";;
+              memout1024) echo "$GITHUB_SHA";;
               p2e) echo "$P2E_REF";;
               *) return 2;;
             esac
           }
           if [[ "${{ matrix.order }}" == forward ]]; then
-            labels=(pr1 exact direct p2e p2a)
+            labels=(pr1 memout0 memout1024 p2e p2a)
           else
-            labels=(p2a p2e direct exact pr1)
+            labels=(p2a p2e memout1024 memout0 pr1)
           fi
           for label in "${labels[@]}"; do
             echo "===== ${{ matrix.order }} $label ====="
@@ -79,18 +79,33 @@ jobs:
             fi
             ./build/blazingmq/tests/bmqp_schemagenerator.t 1 > "perf-results/$label-correctness.txt"
             ./build/blazingmq/tests/bmqp_schemagenerator.t 2 > "perf-results/$label-allocator.txt"
-            if [[ "$label" == direct || "$label" == exact || "$label" == p2e ]]; then
+            ./build/blazingmq/tests/bmqp_schemagenerator.t 5 > "perf-results/$label-boundary.txt"
+            if [[ "$label" == pr1 || "$label" == memout0 || "$label" == memout1024 || "$label" == p2e ]]; then
               ./build/blazingmq/tests/bmqp_schemagenerator.t 4 > "perf-results/$label-exception.txt"
               valgrind --quiet --error-exitcode=99 --leak-check=full --show-leak-kinds=definite,possible \
                 ./build/blazingmq/tests/bmqp_schemagenerator.t 4 \
                 > "perf-results/$label-valgrind.txt" 2> "perf-results/$label-valgrind-errors.txt"
+              if [[ "$label" == memout0 || "$label" == memout1024 || "$label" == p2e ]]; then
+                valgrind --quiet --error-exitcode=99 --leak-check=full --show-leak-kinds=definite,possible \
+                  ./build/blazingmq/tests/bmqp_schemagenerator.t 5 \
+                  > "perf-results/$label-boundary-valgrind.txt" 2> "perf-results/$label-boundary-valgrind-errors.txt"
+              fi
+            else
+              # Research control: record P2A's known exception-safety gap without
+              # aborting the full comparative benchmark.
+              if ./build/blazingmq/tests/bmqp_schemagenerator.t 4 \
+                  > "perf-results/$label-exception.txt" 2>&1; then
+                echo "p2a exception test: PASS" > "perf-results/p2a-exception-status.txt"
+              else
+                echo "p2a exception test: FAIL (known candidate issue)" > "perf-results/p2a-exception-status.txt"
+              fi
             fi
             taskset -c 0 ./build/blazingmq/tests/bmqp_schemagenerator.t -1 \
               --benchmark_min_time=0.12s --benchmark_repetitions=4 \
               --benchmark_report_aggregates_only=true \
               --benchmark_out="perf-results/$label-bench.json" \
               --benchmark_out_format=json > /dev/null
-            if [[ "$label" == p2a || "$label" == p2e || "$label" == direct || "$label" == exact ]]; then
+            if true; then
               /usr/bin/time -v ./build/blazingmq/tests/bmqp_schemagenerator.t 3 \
                 > "perf-results/$label-convergence.txt" \
                 2> "perf-results/$label-convergence-time.txt"
@@ -108,10 +123,10 @@ jobs:
               if not p.exists(): return {}
               obj=json.loads(p.read_text())
               return {r["name"].removesuffix("_median"):float(r["cpu_time"]) for r in obj["benchmarks"] if r.get("aggregate_name")=="median"}
-          data={k:read(k) for k in ("pr1","direct","exact","p2a","p2e")}
-          lines=["## BDE buffer reuse evaluation", ""]
-          for target in ("direct","exact","p2e","p2a"):
-              for old in ("pr1", "p2a"):
+          data={k:read(k) for k in ("pr1","memout0","memout1024","p2a","p2e")}
+          lines=["## MemOutStreamBuf vs P2E / P2A on pinned CPU (median CPU time)", ""]
+          for target in ("memout0","memout1024","p2e","p2a"): 
+              for old in ("pr1", "p2e", "p2a"):
                   if old == target: continue
                   keys=data[old].keys() & data[target].keys()
                   if not keys:
@@ -127,7 +142,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: schema-bde-reuse-${{ matrix.order }}
+          name: schema-memout-${{ matrix.order }}
           path: perf-results
           retention-days: 14
           if-no-files-found: warn
