@@ -20,8 +20,10 @@
 
 // BDE
 #include <bdlma_localsequentialallocator.h>
-#include <bdlsb_overflowmemoutput.h>
+#include <bsl_cstring.h>
+#include <bsl_limits.h>
 #include <bsl_utility.h>
+#include <bslma_deallocateobjectproctor.h>
 
 namespace BloombergLP {
 namespace bmqp {
@@ -83,28 +85,59 @@ SchemaGenerator::getSchemaId(const MessageProperties* mps)
         return MessagePropertiesInfo();  // RETURN
     }
 
-    char localBuffer[1024];
-    bdlsb::OverflowMemOutput buffer(
-        localBuffer,
-        sizeof localBuffer,
-        d_allocator_p);
+    // Build the key in one pass without repeatedly growing a string on a
+    // sequential allocator.  The local raw buffer covers the common case;
+    // larger keys grow geometrically on the supplied allocator, where old
+    // buffers can be released immediately.
+    char             localBuffer[1024];
+    char            *buffer        = localBuffer;
+    char            *dynamicBuffer = 0;
+    bslma::DeallocateObjectProctor<bslma::Allocator *, char> bufferGuard(
+        d_allocator_p, 0);
+    bsl::size_t      size          = 0;
+    bsl::size_t      capacity      = sizeof localBuffer;
 
     MessagePropertiesIterator it(mps);
     while (it.hasNext()) {
-        buffer.sputc('_');
-        buffer.sputn(it.name().data(), it.name().size());
-    }
+        const bsl::string& name     = it.name();
+        const bsl::size_t  required = size + 1 + name.size();
 
-    const bsl::size_t keyLength = buffer.dataLength();
+        if (required > capacity) {
+            bsl::size_t newCapacity = capacity;
+            const bsl::size_t maxCapacity =
+                bsl::numeric_limits<bsl::size_t>::max();
+
+            while (newCapacity < required) {
+                if (newCapacity > maxCapacity / 2) {
+                    newCapacity = required;
+                    break;
+                }
+                newCapacity *= 2;
+            }
+
+            char *next = static_cast<char *>(
+                d_allocator_p->allocate(newCapacity));
+            bsl::memcpy(next, buffer, size);
+
+            if (dynamicBuffer) {
+                d_allocator_p->deallocate(dynamicBuffer);
+            }
+            bufferGuard.reset(next);
+
+            dynamicBuffer = next;
+            buffer        = next;
+            capacity      = newCapacity;
+        }
+
+        buffer[size++] = '_';
+        bsl::memcpy(buffer + size, name.data(), name.size());
+        size += name.size();
+    }
 
     bdlma::LocalSequentialAllocator<1024> localAllocator(d_allocator_p);
     bsl::string key(&localAllocator);
-    key.reserve(keyLength);
-    key.append(buffer.initialBuffer(), buffer.dataLengthInInitialBuffer());
-    if (buffer.dataLengthInOverflowBuffer()) {
-        key.append(buffer.overflowBuffer(),
-                   buffer.dataLengthInOverflowBuffer());
-    }
+
+    key.assign(buffer, size);
 
     typedef bsl::pair<ContextMap::iterator, bool> InsertOrLookup;
 
