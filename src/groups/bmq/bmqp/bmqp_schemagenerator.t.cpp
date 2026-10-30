@@ -365,7 +365,7 @@ static void test3_convergenceMatrix()
     const int threads[]  = {1, 2, 4, 8, 16};
 
     const int k_MISS_RING_SIZE = 32;
-    const int k_ITERATIONS     = 2000;
+    const int k_ITERATIONS     = 10000;
 
     for (int s = 0; s < 3; ++s) {
         for (int h = 0; h < 5; ++h) {
