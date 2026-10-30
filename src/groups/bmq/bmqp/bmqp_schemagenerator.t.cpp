@@ -588,6 +588,183 @@ static void test5_schemaKeyBoundaryCases()
     cout << "BOUNDARY_CASES_OK cases=" << cases << endl;
 }
 
+// Test real concurrent access to one SchemaGenerator under stable-cache and
+// forced-LRU-churn conditions.  Workers report failures to the main thread
+// rather than invoking test assertions from other threads.
+struct SchemaStressWorker {
+    bmqp::SchemaGenerator*               d_generator_p;
+    bslmt::Barrier*                      d_barrier_p;
+    bmqp::MessageProperties              d_hot;
+    bsl::vector<bmqp::MessageProperties> d_cold;
+    bsl::vector<SchemaIdType>             d_expectedCold;
+    SchemaIdType                          d_expectedHot;
+    int                                   d_hotRate;
+    int                                   d_iterations;
+    int                                   d_capacity;
+    bool                                  d_stable;
+    int                                   d_failures;
+    bsls::Types::Int64                    d_checksum;
+
+    explicit SchemaStressWorker(bslma::Allocator* allocator)
+    : d_generator_p(0)
+    , d_barrier_p(0)
+    , d_hot(allocator)
+    , d_cold(allocator)
+    , d_expectedCold(allocator)
+    , d_expectedHot(NO_SCHEMA)
+    , d_hotRate(100)
+    , d_iterations(0)
+    , d_capacity(0)
+    , d_stable(false)
+    , d_failures(0)
+    , d_checksum(0)
+    {
+    }
+};
+
+static void schemaStressWorker(SchemaStressWorker* data)
+{
+    int missIndex = 0;
+    data->d_barrier_p->wait();
+
+    for (int i = 0; i < data->d_iterations; ++i) {
+        const bool hot = i % 100 < data->d_hotRate;
+        int index = 0;
+        const bmqp::MessageProperties* mps = &data->d_hot;
+        if (!hot) {
+            index = missIndex++ % static_cast<int>(data->d_cold.size());
+            mps   = &data->d_cold[index];
+        }
+
+        const bmqp::MessagePropertiesInfo info =
+            data->d_generator_p->getSchemaId(mps);
+        const SchemaIdType id = info.schemaId();
+
+        if (id == NO_SCHEMA || id < 1 || id > data->d_capacity) {
+            ++data->d_failures;
+        }
+        if (data->d_stable) {
+            const SchemaIdType expected = hot
+                                          ? data->d_expectedHot
+                                          : data->d_expectedCold[index];
+            if (id != expected || info.isRecycled()) {
+                ++data->d_failures;
+            }
+        }
+        data->d_checksum += id;
+    }
+}
+
+static void test6_concurrentSchemaStress()
+{
+    bmqtst::TestHelperUtil::ignoreCheckDefAlloc() = true;
+    bmqtst::TestHelperUtil::ignoreCheckGblAlloc() = true;
+
+    struct Shape { const char* name; int properties; int nameLength; };
+    const Shape shapes[] = {{"small", 4, 32}, {"large", 64, 128}};
+    const int   threads[] = {1, 4, 8, 16, 32};
+    const int   hotRates[] = {100, 50, 90, 0};
+    const int   k_ROUNDS = 3;
+    const int   k_ITERATIONS = 5000;
+    int cases = 0;
+
+    bslma::Allocator* allocator = &bslma::NewDeleteAllocator::singleton();
+
+    for (int shape = 0; shape < 2; ++shape) {
+        for (int mode = 0; mode < 4; ++mode) {
+            const bool stable = mode < 2;
+            const int capacity = stable ? 256 : 16;
+            const int ringSize = stable ? 4 : 32;
+
+            for (int t = 0; t < 5; ++t) {
+                const int numThreads = threads[t];
+                for (int round = 0; round < k_ROUNDS; ++round) {
+                    bmqp::SchemaGenerator generator(allocator);
+                    generator._setCapacity(capacity);
+                    bslmt::Barrier barrier(numThreads + 1);
+                    bsl::vector<SchemaStressWorker*> workers(allocator);
+                    workers.reserve(numThreads);
+
+                    for (int thread = 0; thread < numThreads; ++thread) {
+                        SchemaStressWorker* data =
+                            new (*allocator) SchemaStressWorker(allocator);
+                        data->d_generator_p = &generator;
+                        data->d_barrier_p   = &barrier;
+                        data->d_hotRate     = hotRates[mode];
+                        data->d_iterations  = k_ITERATIONS;
+                        data->d_capacity    = capacity;
+                        data->d_stable      = stable;
+                        populateConvergenceProperties(
+                            &data->d_hot, shapes[shape].properties,
+                            shapes[shape].nameLength, 1);
+                        data->d_cold.reserve(ringSize);
+                        data->d_expectedCold.reserve(ringSize);
+                        for (int n = 0; n < ringSize; ++n) {
+                            data->d_cold.emplace_back();
+                            populateConvergenceProperties(
+                                &data->d_cold.back(),
+                                shapes[shape].properties,
+                                shapes[shape].nameLength,
+                                1000 + thread * ringSize + n);
+                        }
+                        workers.push_back(data);
+                    }
+
+                    // Fully populate the stable case before worker launch so
+                    // concurrent lookups must return exactly the same IDs.
+                    // Churn has capacity 16 and more than 16 unique keys.
+                    for (int thread = 0; thread < numThreads; ++thread) {
+                        SchemaStressWorker* data = workers[thread];
+                        data->d_expectedHot =
+                            generator.getSchemaId(&data->d_hot).schemaId();
+                        if (stable) {
+                            for (int n = 0; n < ringSize; ++n) {
+                                data->d_expectedCold.push_back(
+                                    generator.getSchemaId(
+                                        &data->d_cold[n]).schemaId());
+                            }
+                        }
+                    }
+
+                    bslmt::ThreadGroup group(allocator);
+                    for (int thread = 0; thread < numThreads; ++thread) {
+                        const int rc = group.addThread(
+                            bdlf::BindUtil::bind(&schemaStressWorker,
+                                                 workers[thread]));
+                        BMQTST_ASSERT_EQ(0, rc);
+                    }
+                    barrier.wait();
+                    group.joinAll();
+
+                    int failures = 0;
+                    bsls::Types::Int64 checksum = 0;
+                    for (int thread = 0; thread < numThreads; ++thread) {
+                        failures += workers[thread]->d_failures;
+                        checksum += workers[thread]->d_checksum;
+                    }
+                    cout << "SCHEMA_STRESS"
+                         << " shape=" << shapes[shape].name
+                         << " mode=" << (stable ? "stable" : "churn")
+                         << " hot_rate=" << hotRates[mode]
+                         << " threads=" << numThreads
+                         << " repetition=" << round
+                         << " ops=" << numThreads * k_ITERATIONS
+                         << " failures=" << failures
+                         << " checksum=" << checksum << endl;
+                    BMQTST_ASSERT_EQ(0, failures);
+                    ++cases;
+
+                    for (int thread = 0; thread < numThreads; ++thread) {
+                        workers[thread]->~SchemaStressWorker();
+                        allocator->deallocate(workers[thread]);
+                    }
+                }
+            }
+        }
+    }
+    cout << "SCHEMA_STRESS_OK cases=" << cases << endl;
+}
+
 #ifdef BMQTST_BENCHMARK_ENABLED
 static void testN1_getSchemaIdHot_GoogleBenchmark(benchmark::State& state)
 {
@@ -632,6 +809,7 @@ int main(int argc, char* argv[])
     case 2: test2_allocatorProfile(); break;
     case 4: test4_allocationFailureRecovery(); break;
     case 5: test5_schemaKeyBoundaryCases(); break;
+    case 6: test6_concurrentSchemaStress(); break;
     case 1: test1_breathingTest(); break;
     case -1:
         BMQTST_BENCHMARK_WITH_ARGS(testN1_getSchemaIdHot,
